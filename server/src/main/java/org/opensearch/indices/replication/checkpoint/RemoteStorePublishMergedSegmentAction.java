@@ -197,6 +197,6 @@ public class RemoteStorePublishMergedSegmentAction extends AbstractPublishCheckp
     }
 
     private RemoteStoreUploader getRemoteStoreUploaderService(IndexShard indexShard) {
-        return new RemoteStoreUploaderService(indexShard, indexShard.store().directory(), indexShard.getRemoteDirectory());
+        return new RemoteStoreUploaderService(indexShard, indexShard.store().compositeStoreDirectory(), indexShard.getRemoteDirectory());
     }
 }

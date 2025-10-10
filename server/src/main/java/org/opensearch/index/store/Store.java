@@ -74,6 +74,7 @@ import org.opensearch.common.lucene.store.ByteArrayIndexInput;
 import org.opensearch.common.lucene.store.InputStreamIndexInput;
 import org.opensearch.common.settings.Setting;
 import org.opensearch.common.settings.Setting.Property;
+import org.opensearch.common.settings.Settings;
 import org.opensearch.common.unit.TimeValue;
 import org.opensearch.common.util.concurrent.AbstractRefCounted;
 import org.opensearch.common.util.concurrent.RefCounted;
@@ -89,12 +90,16 @@ import org.opensearch.env.ShardLock;
 import org.opensearch.env.ShardLockObtainFailedException;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.CombinedDeletionPolicy;
+import org.opensearch.index.engine.DataFormatPlugin;
 import org.opensearch.index.engine.Engine;
+import org.opensearch.index.engine.exec.coord.Any;
 import org.opensearch.index.seqno.SequenceNumbers;
 import org.opensearch.index.shard.AbstractIndexShardComponent;
 import org.opensearch.index.shard.IndexShard;
 import org.opensearch.index.shard.ShardPath;
 import org.opensearch.index.translog.Translog;
+import org.opensearch.plugins.PluginsService;
+import org.opensearch.index.engine.exec.DataFormat;
 
 import java.io.Closeable;
 import java.io.EOFException;
@@ -172,6 +177,7 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
     );
 
     private final AtomicBoolean isClosed = new AtomicBoolean(false);
+    private final CompositeStoreDirectory compositeStoreDirectory;
     private final StoreDirectory directory;
     private final ReentrantReadWriteLock metadataLock = new ReentrantReadWriteLock();
     private final ShardLock shardLock;
@@ -192,7 +198,7 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
     };
 
     public Store(ShardId shardId, IndexSettings indexSettings, Directory directory, ShardLock shardLock) {
-        this(shardId, indexSettings, directory, shardLock, OnClose.EMPTY, null);
+        this(shardId, indexSettings, directory, shardLock, OnClose.EMPTY, createTempShardPath(shardId), createMockPluginsService());
     }
 
     public Store(
@@ -203,14 +209,38 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
         OnClose onClose,
         ShardPath shardPath
     ) {
+        this(shardId, indexSettings, directory, shardLock, onClose, shardPath, createMockPluginsService());
+    }
+
+    public Store(
+        ShardId shardId,
+        IndexSettings indexSettings,
+        Directory directory,
+        ShardLock shardLock,
+        OnClose onClose,
+        ShardPath shardPath,
+        PluginsService pluginsService
+    ) {
         super(shardId, indexSettings);
+
+        // Use mock PluginsService if none provided
+        PluginsService actualPluginsService = pluginsService != null ? pluginsService : createMockPluginsService();
+        // Create temp ShardPath if none provided
+        ShardPath actualShardPath = shardPath != null ? shardPath : createTempShardPath(shardId);
+
         final TimeValue refreshInterval = indexSettings.getValue(INDEX_STORE_STATS_REFRESH_INTERVAL_SETTING);
         logger.debug("store stats are refreshed with refresh_interval [{}]", refreshInterval);
         ByteSizeCachingDirectory sizeCachingDir = new ByteSizeCachingDirectory(directory, refreshInterval);
         this.directory = new StoreDirectory(sizeCachingDir, Loggers.getLogger("index.store.deletes", shardId));
+        // Create CompositeStoreDirectory following CompositeIndexingExecutionEngine pattern
+        List<DataFormat> formats = List.of(DataFormat.LUCENE, DataFormat.TEXT);
+        Any dataFormats = new Any(formats);
+        this.compositeStoreDirectory = new CompositeStoreDirectory(indexSettings, actualPluginsService, dataFormats, actualShardPath, logger);
+        logger.debug("Created CompositeStoreDirectory with plugin-based discovery");
+
         this.shardLock = shardLock;
         this.onClose = onClose;
-        this.shardPath = shardPath;
+        this.shardPath = actualShardPath;
         this.isIndexSortEnabled = indexSettings.getIndexSortConfig().hasIndexSort();
         this.isParentFieldEnabledVersion = indexSettings.getIndexVersionCreated().onOrAfter(org.opensearch.Version.V_3_2_0);
         assert onClose != null;
@@ -218,9 +248,29 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
         assert shardLock.getShardId().equals(shardId);
     }
 
+    /**
+     * Creates a mock PluginsService with Lucene and Parquet data format plugins for testing
+     */
+    private static MockPluginsServiceWithFormats createMockPluginsService() {
+        return new MockPluginsServiceWithFormats();
+    }
+
+    /**
+     * Creates a temporary ShardPath for testing when none is provided
+     */
+    private static ShardPath createTempShardPath(ShardId shardId) {
+        Path tempPath = Path.of(System.getProperty("java.io.tmpdir"), "opensearch-test", shardId.toString());
+        return new ShardPath(false, tempPath, tempPath, shardId);
+    }
+
     public Directory directory() {
         ensureOpen();
         return directory;
+    }
+
+    public CompositeStoreDirectory compositeStoreDirectory() {
+        ensureOpen();
+        return compositeStoreDirectory;
     }
 
     public ShardPath shardPath() {
@@ -541,7 +591,7 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
         // Leverage try-with-resources to close the shard lock for us
         try (Closeable c = shardLock) {
             try {
-                directory.innerClose(); // this closes the distributorDirectory as well
+                directory.close(); // close the composite directory
             } finally {
                 onClose.accept(shardLock);
             }
@@ -757,7 +807,7 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
                     continue;
                 }
                 try {
-                    directory.deleteFile(reason, existingFile);
+                    directory.deleteFile(existingFile);
                     // FNF should not happen since we hold a write lock?
                 } catch (IOException ex) {
                     if (existingFile.startsWith(IndexFileNames.SEGMENTS) || existingFile.startsWith(CORRUPTED_MARKER_NAME_PREFIX)) {
@@ -1696,10 +1746,12 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
 
     public void deleteQuiet(String... files) {
         ensureOpen();
+        CompositeStoreDirectory compositeStoreDirectory = this.compositeStoreDirectory;
         StoreDirectory directory = this.directory;
         for (String file : files) {
             try {
-                directory.deleteFile("Store.deleteQuiet", file);
+                compositeStoreDirectory.deleteFile(file);
+                directory.deleteFile(file);
             } catch (Exception ex) {
                 // ignore :(
             }
@@ -1947,5 +1999,26 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
             iwc.setParentField(Lucene.PARENT_FIELD);
         }
         return iwc;
+    }
+
+    /**
+     * Simple mock PluginsService that provides empty plugin list
+     * CompositeStoreDirectory will use fallback logic when no plugins are found
+     */
+    public static class MockPluginsServiceWithFormats extends PluginsService {
+
+        /**
+         * Creates a mock PluginsService - CompositeStoreDirectory handles fallback
+         */
+        public MockPluginsServiceWithFormats() {
+            super(Settings.EMPTY, null, null, null, Collections.emptyList());
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public <T> List<T> filterPlugins(Class<T> type) {
+            // Return empty list - CompositeStoreDirectory has fallback logic
+            return Collections.emptyList();
+        }
     }
 }

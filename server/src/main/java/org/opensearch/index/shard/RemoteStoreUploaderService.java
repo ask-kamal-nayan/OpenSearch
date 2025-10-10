@@ -19,6 +19,7 @@ import org.opensearch.common.logging.Loggers;
 import org.opensearch.common.util.UploadListener;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.index.store.CompositeDirectory;
+import org.opensearch.index.store.CompositeStoreDirectory;
 import org.opensearch.index.store.RemoteSegmentStoreDirectory;
 
 import java.util.Collection;
@@ -34,13 +35,13 @@ public class RemoteStoreUploaderService implements RemoteStoreUploader {
     private final Logger logger;
 
     private final IndexShard indexShard;
-    private final Directory storeDirectory;
+    private final CompositeStoreDirectory storeDirectory;
     private final RemoteSegmentStoreDirectory remoteDirectory;
 
     public RemoteStoreUploaderService(IndexShard indexShard, Directory storeDirectory, RemoteSegmentStoreDirectory remoteDirectory) {
         logger = Loggers.getLogger(getClass(), indexShard.shardId());
         this.indexShard = indexShard;
-        this.storeDirectory = storeDirectory;
+        this.storeDirectory = (CompositeStoreDirectory) storeDirectory;
         this.remoteDirectory = remoteDirectory;
     }
 
@@ -61,7 +62,8 @@ public class RemoteStoreUploaderService implements RemoteStoreUploader {
         logger.debug("Effective new segments files to upload {}", localSegments);
         ActionListener<Collection<Void>> mappedListener = ActionListener.map(listener, resp -> null);
         GroupedActionListener<Void> batchUploadListener = new GroupedActionListener<>(mappedListener, localSegments.size());
-        Directory directory = ((FilterDirectory) (((FilterDirectory) storeDirectory).getDelegate())).getDelegate();
+
+        Directory directory = storeDirectory;
 
         for (String localSegment : localSegments) {
             // Initializing listener here to ensure that the stats increment operations are thread-safe

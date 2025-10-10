@@ -48,6 +48,19 @@ public class CatalogSnapshot extends AbstractRefCounted {
         return Collections.unmodifiableCollection(segmentMap.values());
     }
 
+    /**
+     * Get all searchable files across all formats.
+     * This method aggregates FileMetadata from all data formats into a single collection.
+     * 
+     * @return Collection containing all FileMetadata from all formats
+     */
+    public Collection<FileMetadata> getAllSearchableFiles() {
+        return dfGroupedSearchableFiles.values()
+            .stream()
+            .flatMap(Collection::stream)
+            .toList();
+    }
+
     @Override
     protected void closeInternal() {
         // notify to file deleter, search, etc

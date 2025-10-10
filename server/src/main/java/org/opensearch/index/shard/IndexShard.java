@@ -149,6 +149,7 @@ import org.opensearch.index.engine.exec.bridge.Indexer;
 import org.opensearch.index.engine.exec.bridge.IndexingThrottler;
 import org.opensearch.index.engine.exec.bridge.StatsHolder;
 import org.opensearch.index.engine.exec.composite.CompositeDataFormatWriter;
+import org.opensearch.index.engine.exec.coord.CatalogSnapshot;
 import org.opensearch.index.engine.exec.coord.CompositeEngine;
 import org.opensearch.index.fielddata.FieldDataStats;
 import org.opensearch.index.fielddata.ShardFieldData;
@@ -5689,6 +5690,10 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
      */
     public GatedCloseable<SegmentInfos> getSegmentInfosSnapshot() {
         return getEngine().getSegmentInfosSnapshot();
+    }
+
+    public CatalogSnapshot getCatalogSnapshotFromEngine() {
+        return compositeEngine.catalogSnapshot();
     }
 
     private TimeValue getRemoteTranslogUploadBufferInterval(Supplier<TimeValue> clusterRemoteTranslogBufferIntervalSupplier) {

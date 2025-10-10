@@ -23,6 +23,14 @@ public interface DataFormat {
 
     void configureStore();
 
+    /**
+     * Returns the directory name for this format under the shard path
+     * @return the directory name to use for this format
+     */
+    default String getDirectoryName() {
+        return name(); // Default implementation uses format name
+    }
+
     static class LuceneDataFormat implements DataFormat {
         @Override
         public Setting<Settings> dataFormatSettings() {
@@ -36,16 +44,40 @@ public interface DataFormat {
 
         @Override
         public String name() {
-            return "";
+            return "lucene";
         }
 
         @Override
         public void configureStore() {
 
         }
+
+        @Override
+        public String getDirectoryName() {
+            return "lucene";
+        }
     }
 
     DataFormat LUCENE = new LuceneDataFormat();
 
     DataFormat TEXT = new TextDF();
+
+    /**
+     * Returns the DataFormat instance for the given name.
+     * This method provides compatibility with enum-like valueOf behavior.
+     * 
+     * @param name the format name
+     * @return the DataFormat instance
+     * @throws IllegalArgumentException if the format name is not recognized
+     */
+    static DataFormat valueOf(String name) {
+        switch (name.toUpperCase()) {
+            case "LUCENE":
+                return LUCENE;
+            case "TEXT":
+                return TEXT;
+            default:
+                throw new IllegalArgumentException("Unknown DataFormat: " + name);
+        }
+    }
 }

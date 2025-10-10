@@ -47,4 +47,9 @@ public class Any implements DataFormat {
             dataFormat.configureStore();
         }
     }
+
+    @Override
+    public String getDirectoryName() {
+        return "composite";
+    }
 }

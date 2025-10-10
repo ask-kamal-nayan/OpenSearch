@@ -31,6 +31,7 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
+import java.util.Collections;
 
 import static org.opensearch.index.shard.RemoteStoreRefreshListener.EXCLUDE_FILES;
 
@@ -110,6 +111,18 @@ public class RemoteSegmentTransferTracker extends RemoteTransferTracker {
      * last successful remote refresh state on successful remote refresh.
      */
     private final Set<String> latestUploadedFiles = ConcurrentCollections.newConcurrentSet();
+
+    /**
+     * Tracks format-specific upload statistics for monitoring and troubleshooting.
+     * Maps format name to upload count for format-aware monitoring.
+     */
+    private final Map<String, AtomicLong> formatUploadCounts = ConcurrentCollections.newConcurrentMap();
+
+    /**
+     * Tracks format-specific upload bytes for detailed monitoring.
+     * Maps format name to total bytes uploaded for that format.
+     */
+    private final Map<String, AtomicLong> formatUploadBytes = ConcurrentCollections.newConcurrentMap();
 
     /**
      * Keeps the bytes lag computed so that we do not compute it for every request.
@@ -351,6 +364,69 @@ public class RemoteSegmentTransferTracker extends RemoteTransferTracker {
         computeBytesLag();
     }
 
+    /**
+     * Increments upload count for a specific format for format-aware monitoring.
+     * @param formatName the name of the data format (e.g., "LUCENE", "PARQUET", "TEXT")
+     */
+    public void incrementFormatUploadCount(String formatName) {
+        formatUploadCounts.computeIfAbsent(formatName, k -> new AtomicLong(0)).incrementAndGet();
+        logger.debug("Incremented upload count for format {}: new count = {}", 
+            formatName, formatUploadCounts.get(formatName).get());
+    }
+
+    /**
+     * Adds bytes uploaded for a specific format for detailed format-aware monitoring.
+     * @param formatName the name of the data format
+     * @param bytes the number of bytes uploaded
+     */
+    public void addFormatUploadBytes(String formatName, long bytes) {
+        formatUploadBytes.computeIfAbsent(formatName, k -> new AtomicLong(0)).addAndGet(bytes);
+        logger.debug("Added {} bytes for format {}: total bytes = {}", 
+            bytes, formatName, formatUploadBytes.get(formatName).get());
+    }
+
+    /**
+     * Gets upload count for a specific format.
+     * @param formatName the name of the data format
+     * @return the number of uploads for this format
+     */
+    public long getFormatUploadCount(String formatName) {
+        return formatUploadCounts.getOrDefault(formatName, new AtomicLong(0)).get();
+    }
+
+    /**
+     * Gets total bytes uploaded for a specific format.
+     * @param formatName the name of the data format
+     * @return the total bytes uploaded for this format
+     */
+    public long getFormatUploadBytes(String formatName) {
+        return formatUploadBytes.getOrDefault(formatName, new AtomicLong(0)).get();
+    }
+
+    /**
+     * Gets all format upload statistics as an immutable map.
+     * @return map of format name to upload count
+     */
+    public Map<String, Long> getFormatUploadCounts() {
+        return formatUploadCounts.entrySet().stream()
+            .collect(Collectors.toMap(
+                Map.Entry::getKey,
+                entry -> entry.getValue().get()
+            ));
+    }
+
+    /**
+     * Gets all format upload byte statistics as an immutable map.
+     * @return map of format name to total bytes uploaded
+     */
+    public Map<String, Long> getFormatUploadBytesMap() {
+        return formatUploadBytes.entrySet().stream()
+            .collect(Collectors.toMap(
+                Map.Entry::getKey,
+                entry -> entry.getValue().get()
+            ));
+    }
+
     private void computeBytesLag() {
         if (latestLocalFileNameLengthMap.isEmpty()) {
             return;
@@ -392,7 +468,9 @@ public class RemoteSegmentTransferTracker extends RemoteTransferTracker {
             uploadTimeMsMovingAverageReference.get().getAverage(),
             getBytesLag(),
             totalUploadTimeInMillis.get(),
-            directoryFileTransferTracker.stats()
+            directoryFileTransferTracker.stats(),
+            getFormatUploadCounts(),
+            getFormatUploadBytesMap()
         );
     }
 
@@ -425,6 +503,8 @@ public class RemoteSegmentTransferTracker extends RemoteTransferTracker {
         public final double uploadTimeMovingAverage;
         public final long bytesLag;
         public final DirectoryFileTransferTracker.Stats directoryFileTransferTrackerStats;
+        public final Map<String, Long> formatUploadCounts;
+        public final Map<String, Long> formatUploadBytes;
 
         public Stats(
             ShardId shardId,
@@ -447,7 +527,9 @@ public class RemoteSegmentTransferTracker extends RemoteTransferTracker {
             double uploadTimeMovingAverage,
             long bytesLag,
             long totalUploadTimeInMs,
-            DirectoryFileTransferTracker.Stats directoryFileTransferTrackerStats
+            DirectoryFileTransferTracker.Stats directoryFileTransferTrackerStats,
+            Map<String, Long> formatUploadCounts,
+            Map<String, Long> formatUploadBytes
         ) {
             this.shardId = shardId;
             this.localRefreshClockTimeMs = localRefreshClockTimeMs;
@@ -470,6 +552,8 @@ public class RemoteSegmentTransferTracker extends RemoteTransferTracker {
             this.bytesLag = bytesLag;
             this.totalUploadTimeInMs = totalUploadTimeInMs;
             this.directoryFileTransferTrackerStats = directoryFileTransferTrackerStats;
+            this.formatUploadCounts = Collections.unmodifiableMap(formatUploadCounts);
+            this.formatUploadBytes = Collections.unmodifiableMap(formatUploadBytes);
         }
 
         public Stats(StreamInput in) throws IOException {
@@ -495,6 +579,10 @@ public class RemoteSegmentTransferTracker extends RemoteTransferTracker {
                 this.bytesLag = in.readLong();
                 this.totalUploadTimeInMs = in.readLong();
                 this.directoryFileTransferTrackerStats = in.readOptionalWriteable(DirectoryFileTransferTracker.Stats::new);
+                
+                // Read format-aware statistics (with backward compatibility)
+                this.formatUploadCounts = in.readMap(StreamInput::readString, StreamInput::readLong);
+                this.formatUploadBytes = in.readMap(StreamInput::readString, StreamInput::readLong);
             } catch (IOException e) {
                 throw e;
             }
@@ -523,6 +611,10 @@ public class RemoteSegmentTransferTracker extends RemoteTransferTracker {
             out.writeLong(bytesLag);
             out.writeLong(totalUploadTimeInMs);
             out.writeOptionalWriteable(directoryFileTransferTrackerStats);
+            
+            // Write format-aware statistics
+            out.writeMap(formatUploadCounts, StreamOutput::writeString, StreamOutput::writeLong);
+            out.writeMap(formatUploadBytes, StreamOutput::writeString, StreamOutput::writeLong);
         }
 
         @Override
@@ -551,7 +643,9 @@ public class RemoteSegmentTransferTracker extends RemoteTransferTracker {
                 && Double.compare(this.uploadTimeMovingAverage, other.uploadTimeMovingAverage) == 0
                 && this.bytesLag == other.bytesLag
                 && this.totalUploadTimeInMs == other.totalUploadTimeInMs
-                && this.directoryFileTransferTrackerStats.equals(other.directoryFileTransferTrackerStats);
+                && this.directoryFileTransferTrackerStats.equals(other.directoryFileTransferTrackerStats)
+                && this.formatUploadCounts.equals(other.formatUploadCounts)
+                && this.formatUploadBytes.equals(other.formatUploadBytes);
         }
 
         @Override
@@ -577,7 +671,9 @@ public class RemoteSegmentTransferTracker extends RemoteTransferTracker {
                 uploadTimeMovingAverage,
                 bytesLag,
                 totalUploadTimeInMs,
-                directoryFileTransferTrackerStats
+                directoryFileTransferTrackerStats,
+                formatUploadCounts,
+                formatUploadBytes
             );
         }
 
@@ -626,6 +722,10 @@ public class RemoteSegmentTransferTracker extends RemoteTransferTracker {
                 + bytesLag
                 + ", directoryFileTransferTrackerStats="
                 + directoryFileTransferTrackerStats
+                + ", formatUploadCounts="
+                + formatUploadCounts
+                + ", formatUploadBytes="
+                + formatUploadBytes
                 + '}';
         }
     }

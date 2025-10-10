@@ -10,6 +10,7 @@ package org.opensearch.index.shard;
 
 import org.apache.logging.log4j.Logger;
 import org.apache.lucene.codecs.CodecUtil;
+import org.apache.lucene.index.SegmentCommitInfo;
 import org.apache.lucene.index.SegmentInfos;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FilterDirectory;
@@ -25,8 +26,11 @@ import org.opensearch.common.util.UploadListener;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.index.engine.EngineException;
 import org.opensearch.index.engine.InternalEngine;
+import org.opensearch.index.engine.exec.FileMetadata;
+import org.opensearch.index.engine.exec.coord.CatalogSnapshot;
 import org.opensearch.index.remote.RemoteSegmentTransferTracker;
 import org.opensearch.index.seqno.SequenceNumbers;
+import org.opensearch.index.store.CompositeStoreDirectory;
 import org.opensearch.index.store.RemoteSegmentStoreDirectory;
 import org.opensearch.index.store.remote.metadata.RemoteSegmentMetadata;
 import org.opensearch.index.translog.Translog;
@@ -36,12 +40,7 @@ import org.opensearch.indices.replication.checkpoint.SegmentReplicationCheckpoin
 import org.opensearch.threadpool.ThreadPool;
 
 import java.io.IOException;
-import java.util.Collection;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.Locale;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -83,6 +82,7 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
 
     private final IndexShard indexShard;
     private final Directory storeDirectory;
+    private final CompositeStoreDirectory compositeStoreDirectory;
     private final RemoteSegmentStoreDirectory remoteDirectory;
     private final RemoteSegmentTransferTracker segmentTracker;
     private final Map<String, String> localSegmentChecksumMap;
@@ -102,9 +102,10 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
         logger = Loggers.getLogger(getClass(), indexShard.shardId());
         this.indexShard = indexShard;
         this.storeDirectory = indexShard.store().directory();
+        this.compositeStoreDirectory = indexShard.store().compositeStoreDirectory();
         this.remoteDirectory = (RemoteSegmentStoreDirectory) ((FilterDirectory) ((FilterDirectory) indexShard.remoteStore().directory())
             .getDelegate()).getDelegate();
-        remoteStoreUploader = new RemoteStoreUploaderService(indexShard, storeDirectory, remoteDirectory);
+        remoteStoreUploader = new RemoteStoreUploaderService(indexShard, compositeStoreDirectory, remoteDirectory);
         localSegmentChecksumMap = new HashMap<>();
         RemoteSegmentMetadata remoteSegmentMetadata = null;
         if (indexShard.routingEntry().primary()) {
@@ -255,7 +256,8 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
                     // Capture replication checkpoint before uploading the segments as upload can take some time and checkpoint can
                     // move.
                     long lastRefreshedCheckpoint = ((InternalEngine) indexShard.getEngine()).lastRefreshedCheckpoint();
-                    Collection<String> localSegmentsPostRefresh = segmentInfos.files(true);
+                    Collection<String> localSegmentsPostRefresh = extractSegments(segmentInfos);
+                    Collection<FileMetadata> fileMetadataCollection = indexShard.getCatalogSnapshotFromEngine().getAllSearchableFiles();
 
                     // Create a map of file name to size and update the refresh segment tracker
                     Map<String, Long> localSegmentsSizeMap = updateLocalSizeMapAndTracker(localSegmentsPostRefresh).entrySet()
@@ -321,6 +323,34 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
         // refresh not occurring until write happens.
         logger.debug("syncSegments runStatus={}", successful.get());
         return successful.get();
+    }
+
+    /**
+     * Temporary code
+     * Extracts parquet file names from SegmentInfos
+     *
+     * @param segmentInfos the SegmentInfos object containing segment metadata
+     * @return List of parquet file names
+     */
+    private Collection<String> extractSegments(SegmentInfos segmentInfos) throws IOException {
+        Collection<String> pfiles = new ArrayList<>();
+        for (SegmentCommitInfo segmentInfo : segmentInfos) {
+            String parquetFile = segmentInfo.info.getAttribute("parquet_file");
+            if (parquetFile != null) {
+
+                logger.info("Remote stale segments [{}]", parquetFile);
+                var fileName = parquetFile.substring(parquetFile.lastIndexOf("/") + 1);
+                // If checksum is stored in attributes, cache it
+                long checksum = compositeStoreDirectory.getChecksumOfLocalFile(fileName);
+                logger.debug("Cached checksum from SegmentInfo for parquet file {}: {}", fileName, checksum);
+                pfiles.add(fileName);
+            }
+        }
+
+        Collection<String> localSegmentsPostRefresh = segmentInfos.files(true);
+        pfiles.addAll(localSegmentsPostRefresh);
+
+        return pfiles;
     }
 
     /**
@@ -406,7 +436,7 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
     }
 
     private boolean isRefreshAfterCommit() throws IOException {
-        String lastCommittedLocalSegmentFileName = SegmentInfos.getLastCommitSegmentsFileName(storeDirectory);
+        String lastCommittedLocalSegmentFileName = SegmentInfos.getLastCommitSegmentsFileName(compositeStoreDirectory);
         return (lastCommittedLocalSegmentFileName != null
             && !remoteDirectory.containsFile(lastCommittedLocalSegmentFileName, getChecksumOfLocalFile(lastCommittedLocalSegmentFileName)));
     }
@@ -441,7 +471,7 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
             remoteDirectory.uploadMetadata(
                 localSegmentsPostRefresh,
                 segmentInfosSnapshot,
-                storeDirectory,
+                compositeStoreDirectory,
                 translogFileGeneration,
                 replicationCheckpoint,
                 indexShard.getNodeId()
@@ -474,8 +504,8 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
 
     private String getChecksumOfLocalFile(String file) throws IOException {
         if (!localSegmentChecksumMap.containsKey(file)) {
-            try (IndexInput indexInput = storeDirectory.openInput(file, IOContext.READONCE)) {
-                String checksum = Long.toString(CodecUtil.retrieveChecksum(indexInput));
+            try (IndexInput indexInput = compositeStoreDirectory.openInput(file, IOContext.READONCE)) {
+                String checksum = Long.toString(compositeStoreDirectory.calculateChecksum(file));
                 localSegmentChecksumMap.put(file, checksum);
             }
         }
@@ -499,7 +529,7 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
      * @return updated map of local segment files and filesize
      */
     private Map<String, Long> updateLocalSizeMapAndTracker(Collection<String> segmentFiles) {
-        return segmentTracker.updateLatestLocalFileNameLengthMap(segmentFiles, storeDirectory::fileLength);
+        return segmentTracker.updateLatestLocalFileNameLengthMap(segmentFiles, compositeStoreDirectory::fileLength);
     }
 
     private void updateFinalStatusInSegmentTracker(boolean uploadStatus, long bytesBeforeUpload, long startTimeInNS) {

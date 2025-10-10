@@ -8,12 +8,15 @@
 
 package org.opensearch.plugins;
 
+import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.exec.DataFormat;
 import org.opensearch.index.engine.exec.IndexingExecutionEngine;
 import org.opensearch.index.mapper.MapperService;
 import org.opensearch.index.shard.ShardPath;
+import org.opensearch.index.store.FormatStoreDirectory;
 import org.opensearch.vectorized.execution.search.spi.DataSourceCodec;
 
+import java.io.IOException;
 import java.util.Map;
 import java.util.Optional;
 
@@ -23,6 +26,11 @@ public interface DataSourcePlugin {
     }
 
     <T extends DataFormat> IndexingExecutionEngine<T> indexingEngine(MapperService mapperService, ShardPath shardPath);
+
+    public FormatStoreDirectory<?> createFormatStoreDirectory(
+        IndexSettings indexSettings,
+        ShardPath shardPath
+    ) throws IOException;
 
     DataFormat getDataFormat();
 }

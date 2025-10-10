@@ -34,12 +34,14 @@ import org.opensearch.common.logging.Loggers;
 import org.opensearch.common.lucene.store.ByteArrayIndexInput;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.index.shard.ShardId;
+import org.opensearch.index.engine.exec.DataFormat;
 import org.opensearch.index.remote.RemoteStorePathStrategy;
 import org.opensearch.index.remote.RemoteStoreUtils;
 import org.opensearch.index.store.lockmanager.FileLockInfo;
 import org.opensearch.index.store.lockmanager.RemoteStoreCommitLevelLockManager;
 import org.opensearch.index.store.lockmanager.RemoteStoreLockManager;
 import org.opensearch.index.store.lockmanager.RemoteStoreMetadataLockManager;
+import org.opensearch.index.store.remote.CompositeRemoteDirectory;
 import org.opensearch.index.store.remote.metadata.RemoteSegmentMetadata;
 import org.opensearch.index.store.remote.metadata.RemoteSegmentMetadataHandlerFactory;
 import org.opensearch.indices.replication.checkpoint.ReplicationCheckpoint;
@@ -615,9 +617,148 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
                 listener.onResponse(null);
             }
         } catch (Exception e) {
-            logger.warn(() -> new ParameterizedMessage("Exception while uploading file {} to the remote segment store", src), e);
+            logger.warn("Exception while uploading file {} to the remote segment store", src, e);
             listener.onFailure(e);
         }
+    }
+
+    /**
+     * Format-agnostic copyFrom method that uploads files to format-specific subdirectories.
+     *
+     * This method provides comprehensive format-aware upload capabilities by:
+     * 1. Detecting file format using CompositeStoreDirectory routing (single detection point)
+     * 2. Creating format-prefixed remote filename (e.g., "lucene/filename__UUID")
+     * 3. Using existing remoteDataDirectory infrastructure for upload
+     * 4. Applying equal treatment to all formats (no Lucene special cases)
+     * 5. Providing detailed format-aware logging for monitoring and troubleshooting
+     *
+     * Storage Structure:
+     * basePath/segments/data/
+     * ├── lucene/_0.cfe__UUID123
+     * ├── lucene/_0.cfs__UUID456
+     * ├── lucene/segments_1__UUID789
+     * ├── text/data.txt__UUID101
+     * └── parquet/data.parquet__UUID102
+     *
+     * @param from              CompositeStoreDirectory source containing format-routed directories
+     * @param src               Source file name
+     * @param context           IOContext for the operation
+     * @param listener          ActionListener for async callback
+     * @param lowPriorityUpload Whether to use low priority upload
+     */
+    public void copyFrom(CompositeStoreDirectory from, String src, IOContext context,
+                        ActionListener<Void> listener, boolean lowPriorityUpload) {
+        long startTime = System.nanoTime();
+        try {
+            // Step 1: Single format detection using existing CompositeStoreDirectory routing
+            FormatStoreDirectory formatDirectory = from.getDirectoryForFile(src);
+            DataFormat detectedFormat = formatDirectory.getDataFormat();
+
+            logger.debug("Format detection completed for file {}: detected format={}, priority={}",
+                src, detectedFormat.name(), lowPriorityUpload ? "LOW" : "NORMAL");
+
+            // Step 2: Create format-aware remote filename (without subdirectories for now)
+            // Format: filename__format__UUID (e.g., segments_3__lucene__UUID123)
+            String baseRemoteFileName = getNewRemoteSegmentFilename(src); // src + "__" + UUID
+            String formatAwareRemoteFileName = src + "__" + detectedFormat.name().toLowerCase() + "__" +
+                baseRemoteFileName.substring(src.length() + 2); // Extract UUID part
+
+            logger.debug("Format-aware upload initiated: file={}, format={}, localPath={}, remotePath={}",
+                src, detectedFormat.name(), formatDirectory.getDirectoryPath().resolve(src), formatAwareRemoteFileName);
+
+            // Step 3: Get Directory interface from FormatStoreDirectory
+            Directory sourceDirectory;
+            if (formatDirectory instanceof LuceneStoreDirectory) {
+                // For Lucene, get the wrapped Directory
+                sourceDirectory = ((LuceneStoreDirectory) formatDirectory).getWrappedDirectory();
+                logger.trace("Using Lucene Directory wrapper for format {} file {}", detectedFormat.name(), src);
+            } else {
+                // For other formats, use CompositeStoreDirectory as fallback
+                sourceDirectory = from;
+                logger.debug("Using CompositeStoreDirectory fallback for format {} file {} (non-Lucene format)",
+                    detectedFormat.name(), src);
+            }
+
+            // Step 4: Use existing remoteDataDirectory with format-aware name
+            // This uploads to: basePath/segments/data/filename__format__UUID
+            boolean uploaded = remoteDataDirectory.copyFrom(
+                sourceDirectory, // Use Directory-compatible source
+                src,
+                formatAwareRemoteFileName, // Upload with format in filename
+                context,
+                () -> {
+                    try {
+                        // Step 5: Post-upload processing with format-aware filename
+                        postUploadFormatAware(formatDirectory, src, formatAwareRemoteFileName, detectedFormat);
+
+                        long uploadDurationMs = (System.nanoTime() - startTime) / 1_000_000;
+                        logger.debug("Format-aware upload completed successfully: file={}, format={}, remotePath={}, durationMs={}",
+                            src, detectedFormat.name(), formatAwareRemoteFileName, uploadDurationMs);
+                    } catch (IOException e) {
+                        logger.error("Format-aware post-upload processing failed: file={}, format={}, remotePath={}, error={}",
+                            src, detectedFormat.name(), formatAwareRemoteFileName, e.getMessage(), e);
+                        throw new RuntimeException("Exception in format-aware postUpload for file " + src +
+                            " (format: " + detectedFormat.name() + ")", e);
+                    }
+                },
+                listener,
+                lowPriorityUpload
+            );
+
+            // Step 6: Fallback for unsupported multi-stream upload
+            if (!uploaded) {
+                logger.debug("Multi-stream upload not supported, using synchronous fallback: file={}, format={}",
+                    src, detectedFormat.name());
+
+                // Use synchronous upload as fallback
+                remoteDataDirectory.copyFrom(sourceDirectory, src, formatAwareRemoteFileName, context);
+                postUploadFormatAware(formatDirectory, src, formatAwareRemoteFileName, detectedFormat);
+
+                long uploadDurationMs = (System.nanoTime() - startTime) / 1_000_000;
+                logger.debug("Format-aware synchronous upload completed: file={}, format={}, remotePath={}, durationMs={}",
+                    src, detectedFormat.name(), formatAwareRemoteFileName, uploadDurationMs);
+
+                listener.onResponse(null);
+            }
+
+        } catch (Exception e) {
+            long failureDurationMs = (System.nanoTime() - startTime) / 1_000_000;
+            logger.warn("Format-aware upload failed: file={}, durationMs={}, error={}",
+                src, failureDurationMs, e.getMessage(), e);
+            listener.onFailure(e);
+        }
+    }
+
+    /**
+     * Format-aware post-upload processing that updates cache with format-aware remote filename.
+     * This maintains compatibility with existing metadata tracking while supporting format identification.
+     *
+     * @param formatDirectory Format-specific source directory
+     * @param src Original local filename
+     * @param formatAwareRemoteFileName Format-aware remote filename (e.g., "file__lucene__UUID")
+     * @param format Detected data format
+     * @throws IOException if checksum calculation or metadata update fails
+     */
+    private void postUploadFormatAware(FormatStoreDirectory formatDirectory, String src,
+                                      String formatAwareRemoteFileName, DataFormat format) throws IOException {
+
+        // Calculate checksum using format-specific directory
+        String checksum = formatDirectory.calculateUploadChecksum(src);
+        long fileLength = formatDirectory.fileLength(src);
+
+        // Create metadata with format-aware remote filename
+        UploadedSegmentMetadata segmentMetadata = new UploadedSegmentMetadata(
+            src,                           // Original local filename: "_0.cfe"
+            formatAwareRemoteFileName,     // Format-aware remote: "_0.cfe__lucene__UUID123"
+            checksum,
+            fileLength
+        );
+
+        // Update cache - key is still original filename for compatibility
+        segmentsUploadedToRemoteStore.put(src, segmentMetadata);
+
+        logger.trace("Updated metadata cache for format-agnostic upload: {} -> {} (format: {}, checksum: {}, length: {})",
+            src, formatAwareRemoteFileName, format.name(), checksum, fileLength);
     }
 
     /**
@@ -760,7 +901,14 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
                     for (String file : segmentFiles) {
                         if (segmentsUploadedToRemoteStore.containsKey(file)) {
                             UploadedSegmentMetadata metadata = segmentsUploadedToRemoteStore.get(file);
-                            metadata.setWrittenByMajor(segmentToLuceneVersion.get(metadata.originalFilename));
+                            if(segmentToLuceneVersion.get(metadata.originalFilename)==null)
+                            {
+                                metadata.setWrittenByMajor(0);
+                            }
+                            else
+                            {
+                                metadata.setWrittenByMajor(segmentToLuceneVersion.get(metadata.originalFilename));
+                            }
                             uploadedSegments.put(file, metadata.toString());
                         } else {
                             throw new NoSuchFileException(file);

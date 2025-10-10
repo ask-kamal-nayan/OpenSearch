@@ -8,14 +8,47 @@
 
 package org.opensearch.index.engine;
 
+import org.opensearch.common.blobstore.BlobContainer;
 import org.opensearch.index.engine.exec.DataFormat;
 import org.opensearch.index.engine.exec.IndexingExecutionEngine;
+import org.opensearch.index.IndexSettings;
 import org.opensearch.index.mapper.MapperService;
 import org.opensearch.index.shard.ShardPath;
+import org.opensearch.index.store.FormatStoreDirectory;
+import org.opensearch.index.store.RemoteDirectory;
+import org.opensearch.index.store.remote.FormatRemoteDirectory;
+
+import java.io.IOException;
 
 public interface DataFormatPlugin  {
 
     <T extends DataFormat> IndexingExecutionEngine<T> indexingEngine(MapperService mapperService, ShardPath shardPath);
 
     DataFormat getDataFormat();
+
+    /**
+     * Creates a format-specific store directory
+     * @param indexSettings the index settings
+     * @param shardPath the shard path where directories should be created
+     * @return FormatStoreDirectory instance for this format
+     */
+     FormatStoreDirectory createFormatStoreDirectory(
+        IndexSettings indexSettings,
+        ShardPath shardPath
+    )throws IOException;
+    /**
+     * Creates a format-specific remote directory for remote storage operations.
+     * This method enables the plugin to provide custom remote directory implementations
+     * for format-specific remote storage requirements.
+     *
+     * @param indexSettings     the index settings
+     * @param baseBlobContainer the base blob container for remote storage
+     * @param remoteBasePath    the base path for remote storage
+     * @return FormatRemoteDirectory instance for this format
+     */
+    FormatRemoteDirectory createFormatRemoteDirectory(
+        IndexSettings indexSettings,
+        BlobContainer baseBlobContainer,
+        String remoteBasePath
+    )throws IOException;
 }
