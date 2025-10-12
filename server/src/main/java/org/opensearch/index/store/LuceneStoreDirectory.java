@@ -31,27 +31,17 @@ import java.util.Set;
  * FormatStoreDirectory implementation for Lucene format files.
  * Wraps existing Lucene Directory to maintain full Lucene compatibility.
  */
-public class LuceneStoreDirectory implements FormatStoreDirectory<DataFormat.LuceneDataFormat> {
-
-    private static final Set<String> LUCENE_EXTENSIONS = Set.of(
-        ".cfs", ".cfe", ".si", ".fnm", ".fdx", ".fdt",
-        ".tim", ".tip", ".doc", ".pos", ".pay",
-        ".nvd", ".nvm", ".dvm", ".dvd", ".tvx", ".tvd", ".tvf",
-        ".del", ".liv", ".fdm", ".tmd", ".psm"
-    );
+public class LuceneStoreDirectory implements FormatStoreDirectory<DataFormat> {
 
     private static final Logger logger = LogManager.getLogger(LuceneStoreDirectory.class);
 
     private final Directory wrappedDirectory;
-    private final DataFormat.LuceneDataFormat dataFormat;
     private final Path directoryPath;
 
     public LuceneStoreDirectory(
-        DataFormat.LuceneDataFormat dataFormat,
         Path shardPath,
         Directory directory
     ) throws IOException {
-        this.dataFormat = dataFormat;
         this.directoryPath = shardPath.resolve("lucene");
         Files.createDirectories(this.directoryPath);
 
@@ -60,15 +50,16 @@ public class LuceneStoreDirectory implements FormatStoreDirectory<DataFormat.Luc
     }
 
     @Override
-    public DataFormat.LuceneDataFormat getDataFormat() {
-        return dataFormat;
+    public DataFormat getDataFormat() {
+        return DataFormat.LUCENE;
     }
 
     @Override
+    @Deprecated
     public boolean acceptsFile(String fileName) {
-        return LUCENE_EXTENSIONS.stream().anyMatch(fileName::endsWith) ||
-               fileName.startsWith("segments_") || fileName.startsWith("metadata") ||
-               fileName.equals("write.lock");
+        // This method is deprecated - format determination should be done through FileMetadata
+        // For backward compatibility, return true for all files since Lucene is the default format
+        return true;
     }
 
     @Override
@@ -336,7 +327,7 @@ public class LuceneStoreDirectory implements FormatStoreDirectory<DataFormat.Luc
         }
 
         logger.debug("Lucene upload completed: localFile={}, remoteFile={}, format={}, directoryPath={}",
-            fileName, remoteFileName, dataFormat.name(), directoryPath.resolve(fileName));
+            fileName, remoteFileName, fileName, directoryPath.resolve(fileName));
 
         // Future enhancements could include:
         // - Updating local metadata about uploaded files

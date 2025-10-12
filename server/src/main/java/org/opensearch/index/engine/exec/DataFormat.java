@@ -58,7 +58,36 @@ public interface DataFormat {
         }
     }
 
+    static class ParquetDataFormat implements DataFormat {
+        @Override
+        public Setting<Settings> dataFormatSettings() {
+            return null;
+        }
+
+        @Override
+        public Setting<Settings> clusterLeveldataFormatSettings() {
+            return null;
+        }
+
+        @Override
+        public String name() {
+            return "parquet";
+        }
+
+        @Override
+        public void configureStore() {
+
+        }
+
+        @Override
+        public String getDirectoryName() {
+            return "parquet";
+        }
+    }
+
     DataFormat LUCENE = new LuceneDataFormat();
+
+    DataFormat PARQUET = new ParquetDataFormat();
 
     DataFormat TEXT = new TextDF();
 
@@ -74,6 +103,8 @@ public interface DataFormat {
         switch (name.toUpperCase()) {
             case "LUCENE":
                 return LUCENE;
+            case "PARQUET":
+                return PARQUET;
             case "TEXT":
                 return TEXT;
             default:

@@ -37,10 +37,22 @@ public interface FormatStoreDirectory<T extends DataFormat> extends Closeable {
     T getDataFormat();
 
     /**
+     * Checks if this directory can handle the given DataFormat
+     * @param format the DataFormat to check
+     * @return true if this directory supports the format, false otherwise
+     */
+    default boolean supportsFormat(DataFormat format) {
+        return getDataFormat().equals(format);
+    }
+
+    /**
      * Determines if this directory can handle the given file
      * @param fileName the name of the file to check
      * @return true if this directory accepts the file, false otherwise
+     * @deprecated Use format-based routing with FileMetadata instead of file extension detection.
+     *             This method will be removed in a future version.
      */
+    @Deprecated
     boolean acceptsFile(String fileName);
 
     /**

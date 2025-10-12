@@ -237,7 +237,7 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
                 // is considered as a first refresh post commit. A cleanup of stale commit files is triggered.
                 // This is done to avoid delete post each refresh.
                 if (isRefreshAfterCommit()) {
-                    remoteDirectory.deleteStaleSegmentsAsync(indexShard.getRemoteStoreSettings().getMinRemoteSegmentMetadataFiles());
+                    remoteDirectory.deleteStaleSegmentsAsync(indexShard.getRemoteStoreSettings().getMinRemoteSegmentMetadataFiles(), null);
                 }
 
                 try (GatedCloseable<SegmentInfos> segmentInfosGatedCloseable = indexShard.getSegmentInfosSnapshot()) {
@@ -256,8 +256,24 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
                     // Capture replication checkpoint before uploading the segments as upload can take some time and checkpoint can
                     // move.
                     long lastRefreshedCheckpoint = ((InternalEngine) indexShard.getEngine()).lastRefreshedCheckpoint();
-                    Collection<String> localSegmentsPostRefresh = extractSegments(segmentInfos);
+
+                    // Use FileMetadata from catalog snapshot instead of extracting segments from SegmentInfos
                     Collection<FileMetadata> fileMetadataCollection = indexShard.getCatalogSnapshotFromEngine().getAllSearchableFiles();
+
+                    // Log format-aware statistics
+                    Map<String, Long> formatCounts = fileMetadataCollection.stream()
+                        .collect(Collectors.groupingBy(
+                            fm -> fm.df().name(),
+                            Collectors.counting()
+                        ));
+
+                    logger.debug("Format-aware segment upload initiated: totalFiles={}, formatBreakdown={}",
+                                fileMetadataCollection.size(), formatCounts);
+
+                    // Extract file names for backward compatibility with existing code
+                    Collection<String> localSegmentsPostRefresh = fileMetadataCollection.stream()
+                        .map(FileMetadata::fileName)
+                        .collect(Collectors.toList());
 
                     // Create a map of file name to size and update the refresh segment tracker
                     Map<String, Long> localSegmentsSizeMap = updateLocalSizeMapAndTracker(localSegmentsPostRefresh).entrySet()
@@ -298,8 +314,8 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
                         }
                     }, latch);
 
-                    // Start the segments files upload
-                    uploadNewSegments(localSegmentsPostRefresh, localSegmentsSizeMap, segmentUploadsCompletedListener);
+                    // Start the segments files upload using FileMetadata
+                    uploadNewSegments(fileMetadataCollection, localSegmentsSizeMap, segmentUploadsCompletedListener);
                     if (latch.await(
                         remoteStoreSettings.getClusterRemoteSegmentTransferTimeout().millis(),
                         TimeUnit.MILLISECONDS
@@ -356,22 +372,47 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
     /**
      * Uploads new segment files to the remote store.
      *
-     * @param localSegmentsPostRefresh collection of segment files present after refresh
+     * @param fileMetadataCollection collection of FileMetadata objects containing format and file information
      * @param localSegmentsSizeMap map of segment file names to their sizes
      * @param segmentUploadsCompletedListener listener to be notified when upload completes
      */
     private void uploadNewSegments(
-        Collection<String> localSegmentsPostRefresh,
+        Collection<FileMetadata> fileMetadataCollection,
         Map<String, Long> localSegmentsSizeMap,
         ActionListener<Void> segmentUploadsCompletedListener
     ) {
-        Collection<String> filteredFiles = localSegmentsPostRefresh.stream().filter(file -> !skipUpload(file)).collect(Collectors.toList());
+        // Filter FileMetadata objects based on whether their files should be uploaded
+        Collection<FileMetadata> filteredFileMetadata = fileMetadataCollection.stream()
+            .filter(fileMetadata -> !skipUpload(fileMetadata))
+            .collect(Collectors.toList());
+
+        // Log format-aware upload statistics
+        Map<String, Long> uploadFormatCounts = filteredFileMetadata.stream()
+            .collect(Collectors.groupingBy(
+                fm -> fm.df().name(),
+                Collectors.counting()
+            ));
+
+        Map<String, Long> skippedFormatCounts = fileMetadataCollection.stream()
+            .filter(fileMetadata -> skipUpload(fileMetadata))
+            .collect(Collectors.groupingBy(
+                fm -> fm.df().name(),
+                Collectors.counting()
+            ));
+
+        logger.debug("Format-aware upload filtering: totalFiles={}, uploadFiles={}, skippedFiles={}, " +
+                    "uploadFormats={}, skippedFormats={}",
+                    fileMetadataCollection.size(), filteredFileMetadata.size(),
+                    fileMetadataCollection.size() - filteredFileMetadata.size(),
+                    uploadFormatCounts, skippedFormatCounts);
+
         Function<Map<String, Long>, UploadListener> uploadListenerFunction = (Map<String, Long> sizeMap) -> createUploadListener(
             localSegmentsSizeMap
         );
 
+        // Pass FileMetadata collection to RemoteStoreUploaderService
         remoteStoreUploader.uploadSegments(
-            filteredFiles,
+            filteredFileMetadata,
             localSegmentsSizeMap,
             segmentUploadsCompletedListener,
             uploadListenerFunction,
@@ -502,6 +543,19 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
         return false;
     }
 
+    private boolean skipUpload(FileMetadata fileMetadata) {
+        try {
+            // Exclude files that are already uploaded and the exclude files to come up with the list of files to be uploaded.
+            return EXCLUDE_FILES.contains(fileMetadata.fileName()) || remoteDirectory.containsFile(fileMetadata.fileName(), getChecksumOfLocalFile(fileMetadata));
+        } catch (IOException e) {
+            logger.error(
+                "Exception while reading checksum of local segment file: {}, ignoring the exception and re-uploading the file",
+                fileMetadata.fileName()
+            );
+        }
+        return false;
+    }
+
     private String getChecksumOfLocalFile(String file) throws IOException {
         if (!localSegmentChecksumMap.containsKey(file)) {
             try (IndexInput indexInput = compositeStoreDirectory.openInput(file, IOContext.READONCE)) {
@@ -510,6 +564,19 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
             }
         }
         return localSegmentChecksumMap.get(file);
+    }
+
+    private String getChecksumOfLocalFile(FileMetadata fileMetadata) throws IOException {
+        if (!localSegmentChecksumMap.containsKey(fileMetadata.fileName())) {
+            try{
+                String checksum = Long.toString(compositeStoreDirectory.calculateChecksum(fileMetadata));
+                localSegmentChecksumMap.put(fileMetadata.fileName(), checksum);
+            }
+            catch (IOException e){
+                logger.info("Exception ", e);
+            }
+        }
+        return localSegmentChecksumMap.get(fileMetadata.fileName());
     }
 
     /**

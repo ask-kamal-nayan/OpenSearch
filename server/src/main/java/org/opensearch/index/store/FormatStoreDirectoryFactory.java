@@ -63,7 +63,6 @@ public class FormatStoreDirectoryFactory {
         Map<DataFormat, FormatStoreDirectory<?>> formatDirectories = new HashMap<>();
         List<DataFormatPlugin> plugins = pluginsService.filterPlugins(DataFormatPlugin.class);
 
-
         logger.debug("Discovered {} data format plugins", plugins.size());
 
         // Iterate through plugins and create format directories
@@ -140,7 +139,6 @@ public class FormatStoreDirectoryFactory {
         FSDirectory fsDirectory = FSDirectory.open(luceneDirectoryPath);
 
         return new LuceneStoreDirectory(
-                (DataFormat.LuceneDataFormat) DataFormat.LUCENE,
                 shardPath.getDataPath(),
                 fsDirectory);
     }

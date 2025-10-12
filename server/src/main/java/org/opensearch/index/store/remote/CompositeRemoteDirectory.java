@@ -14,6 +14,8 @@ import org.apache.lucene.index.CorruptIndexException;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
+import org.apache.lucene.store.IndexOutput;
+import org.apache.lucene.util.IOUtils;
 import org.opensearch.ExceptionsHelper;
 import org.opensearch.common.UUIDs;
 import org.opensearch.common.annotation.PublicApi;
@@ -21,29 +23,34 @@ import org.opensearch.common.blobstore.AsyncMultiStreamBlobContainer;
 import org.opensearch.common.blobstore.BlobContainer;
 import org.opensearch.common.blobstore.BlobPath;
 import org.opensearch.common.blobstore.BlobStore;
+import org.opensearch.common.blobstore.BlobMetadata;
 import org.opensearch.common.blobstore.exception.CorruptFileException;
 import org.opensearch.common.blobstore.stream.write.WriteContext;
 import org.opensearch.common.blobstore.stream.write.WritePriority;
 import org.opensearch.common.blobstore.transfer.RemoteTransferContainer;
 import org.opensearch.common.blobstore.transfer.stream.OffsetRangeIndexInputStream;
 import org.opensearch.common.blobstore.transfer.stream.OffsetRangeInputStream;
+import org.opensearch.common.lucene.store.ByteArrayIndexInput;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.common.unit.ByteSizeUnit;
+import org.opensearch.index.engine.MergedSegmentWarmer;
 import org.opensearch.index.engine.exec.DataFormat;
+import org.opensearch.index.engine.exec.FileMetadata;
 import org.opensearch.index.engine.exec.coord.Any;
 import org.opensearch.index.store.CompositeStoreDirectory;
-import org.opensearch.index.store.FormatStoreDirectory;
-import org.opensearch.index.store.RemoteDirectory;
+import org.opensearch.index.store.RemoteIndexInput;
+import org.opensearch.index.store.RemoteIndexOutput;
 
 import java.io.Closeable;
-import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.Map;
+import java.nio.file.NoSuchFileException;
+import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.function.UnaryOperator;
+import java.util.stream.Collectors;
 
 /**
  * CompositeRemoteDirectory with direct BlobContainer access per format.
@@ -51,7 +58,7 @@ import java.util.function.UnaryOperator;
  * Key Architecture:
  * - Map of DataFormat to BlobContainer for direct blob access
  * - Lazy BlobContainer creation when new formats are encountered
- * - Format determination from file path/local directory routing
+ * - Format determination from FileMetadata instead of file extension parsing
  * - ALL formats get equal treatment with same generic streaming logic
  *
  * @opensearch.api
@@ -59,17 +66,13 @@ import java.util.function.UnaryOperator;
 @PublicApi(since = "3.0.0")
 public class CompositeRemoteDirectory implements Closeable {
 
-    private Any dataFormat;
-
     private final UnaryOperator<OffsetRangeInputStream> uploadRateLimiter;
-
     private final UnaryOperator<OffsetRangeInputStream> lowPriorityUploadRateLimiter;
-
     private final DownloadRateLimiterProvider downloadRateLimiterProvider;
 
     /**
      * Map containing the mapping of segment files that are pending download as part of the pre-copy (warm) phase of
-     * {@link org.opensearch.index.engine.MergedSegmentWarmer}. The key is the local filename and value is the remote filename.
+     * {@link MergedSegmentWarmer}. The key is the local filename and value is the remote filename.
      */
     final Map<String, String> pendingDownloadMergedSegments;
 
@@ -122,7 +125,8 @@ public class CompositeRemoteDirectory implements Closeable {
         BlobPath baseBlobPath,
         Logger logger
     ) {
-        this(blobStore, baseBlobPath, UnaryOperator.identity(), UnaryOperator.identity(), UnaryOperator.identity(), UnaryOperator.identity(), null, logger);
+        this(blobStore, baseBlobPath, UnaryOperator.identity(), UnaryOperator.identity(),
+             UnaryOperator.identity(), UnaryOperator.identity(), null, logger);
     }
 
     /**
@@ -135,9 +139,8 @@ public class CompositeRemoteDirectory implements Closeable {
         Any dataFormats,
         Logger logger
     ) {
-        this(blobStore, baseBlobPath, UnaryOperator.identity(), UnaryOperator.identity(), UnaryOperator.identity(), UnaryOperator.identity(), null, logger);
-        
-        this.dataFormat = dataFormats;
+        this(blobStore, baseBlobPath, UnaryOperator.identity(), UnaryOperator.identity(),
+             UnaryOperator.identity(), UnaryOperator.identity(), null, logger);
 
         // Eagerly create BlobContainers for each format
         for (DataFormat format : dataFormats.getDataFormats()) {
@@ -158,7 +161,7 @@ public class CompositeRemoteDirectory implements Closeable {
      * This is where the lazy creation happens - if we don't have a BlobContainer
      * for this format yet, we create one and store it in the map.
      *
-     * @param format the data format
+     * @param format the data format name
      * @return BlobContainer for the format (created if not exists)
      */
     public BlobContainer getBlobContainerForFormat(String format) {
@@ -172,98 +175,58 @@ public class CompositeRemoteDirectory implements Closeable {
         });
     }
 
-    /**
-     * Determine format from file path by routing through CompositeStoreDirectory.
-     * This uses the same file extension/pattern logic as the local directories.
-     *
-     * @param from CompositeStoreDirectory source
-     * @param fileName file name to determine format for
-     * @return DataFormat for the file
-     */
-    private String determineFormatFromFile(CompositeStoreDirectory from, String fileName) {
-        try {
-            // Route through CompositeStoreDirectory to determine which format accepts this file
-            FormatStoreDirectory formatDir = from.getDirectoryForFile(fileName);
-            return formatDir.getDataFormat().name();
-        } catch (Exception e) {
-            throw new IllegalArgumentException("Cannot determine format for file: " + fileName, e);
+    public void copyFrom(CompositeStoreDirectory from, FileMetadata src, String dest, IOContext context)
+        throws IOException {
+        boolean success = false;
+        try (IndexInput is = from.openInput(src, IOContext.READONCE);
+             IndexOutput os = createOutput(dest, src.df().name(), context)) {
+            os.copyBytes(is, is.length());
+            success = true;
+        } finally {
+            if (!success) {
+                from.deleteFile(src);
+            }
         }
     }
 
     /**
-     * Format-agnostic copyFrom with lazy BlobContainer creation.
-     *
-     * Flow:
-     * 1. Determine format from file path via CompositeStoreDirectory routing (SINGLE detection point)
-     * 2. Get or create BlobContainer for that format (lazy creation)
-     * 3. Upload file directly to format's BlobContainer using generic streaming
-     * 4. ALL formats use identical logic - no special cases
-     *
-     * @param from CompositeStoreDirectory source
-     * @param src source file name
-     * @param context IO context
-     * @param listener completion listener
-     * @param lowPriorityUpload whether to use low priority upload
+     * Primary copyFrom method using FileMetadata - similar to RemoteDirectory.copyFrom but with format-aware routing
      */
     public boolean copyFrom(
         CompositeStoreDirectory from,
-        String src,
+        FileMetadata fileMetadata,
         String remoteFileName,
         IOContext context,
         Runnable postUploadRunner,
         ActionListener<Void> listener,
         boolean lowPriorityUpload
     ) {
-        BlobContainer blobContainer = getBlobContainerForFormat(determineFormatFromFile(from, remoteFileName));
-        if (blobContainer instanceof AsyncMultiStreamBlobContainer) {
-            try {
-                uploadBlob(from, src, remoteFileName, context, postUploadRunner, listener, lowPriorityUpload);
-            } catch (Exception e) {
-                listener.onFailure(e);
-            }
-            return true;
-        }
-        return false;
-    }
+        try {
+            // Extract format and filename from FileMetadata
+            DataFormat format = fileMetadata.df();
+            String fileName = fileMetadata.fileName();
+            BlobContainer blobContainer = getBlobContainerForFormat(format.name());
 
-//    /**
-//     * Generic streaming copy that works identically for ALL formats.
-//     * Lucene, Parquet, Custom formats - all use exactly the same logic.
-//     */
-//    private void performGenericStreamingCopy(CompositeRemoteDirectory sourceDirectory, String src,
-//                                           BlobContainer targetBlobContainer, DataFormat format,
-//                                           IOContext context, ActionListener<Void> listener,
-//                                           boolean lowPriorityUpload) throws IOException {
-//
-//        // Verify source file exists
-//        if (!sourceDirectory.fileExists(src)) {
-//            throw new FileNotFoundException("Source file not found: " + src + " in format: " + format.name());
-//        }
-//
-//        // Generate unique remote filename
-//        String remoteFileName = generateRemoteFileName(src);
-//        long fileLength = sourceDirectory.fileLength(src);
-//
-//        logger.trace("Starting generic stream copy for file {} (format: {}, length: {})",
-//            src, format.name(), fileLength);
-//
-//        // Generic streaming upload - identical logic for all formats
-//        try (InputStream inputStream = sourceDirectory.openInput(src)) {
-//            // Calculate checksum while streaming (format-agnostic)
-//            ChecksumCalculatingInputStream checksumStream = new ChecksumCalculatingInputStream(inputStream);
-//
-//            // Direct blob upload to format's container - same for all formats
-//            performGenericBlobUpload(checksumStream, targetBlobContainer, remoteFileName, fileLength,
-//                src, format, listener, lowPriorityUpload);
-//
-//        } catch (IOException e) {
-//            throw new IOException("Generic streaming copy failed for file: " + src + " format: " + format.name(), e);
-//        }
-//    }
+            if (blobContainer instanceof AsyncMultiStreamBlobContainer) {
+                logger.debug("Starting format-aware upload: file={}, format={}, container={}",
+                           fileName, format.name(), blobContainer.path());
+                uploadBlob(from, fileMetadata, remoteFileName, context, postUploadRunner, listener, lowPriorityUpload);
+                return true;
+            }
+
+            logger.warn("BlobContainer does not support async multi-stream upload: {}", blobContainer.getClass());
+            return false;
+
+        } catch (Exception e) {
+            logger.error("Failed to start format-aware upload: file={}, error={}", fileMetadata.fileName(), e.getMessage(), e);
+            listener.onFailure(e);
+            return true;  // Return true to indicate we handled it (even though it failed)
+        }
+    }
 
     private void uploadBlob(
         CompositeStoreDirectory from,
-        String src,
+        FileMetadata src,
         String remoteFileName,
         IOContext ioContext,
         Runnable postUploadRunner,
@@ -271,15 +234,15 @@ public class CompositeRemoteDirectory implements Closeable {
         boolean lowPriorityUpload
     ) throws Exception {
         assert ioContext != IOContext.READONCE : "Remote upload will fail with IoContext.READONCE";
+        String dataFormat = src.df().name();
         long expectedChecksum = calculateChecksumOfChecksum(from, src);
         long contentLength;
         IndexInput indexInput = from.openInput(src, ioContext);
         try {
             contentLength = indexInput.length();
-            BlobContainer targetBlobContainer = getBlobContainer(from, src);
             boolean remoteIntegrityEnabled = false;
-            if (targetBlobContainer instanceof AsyncMultiStreamBlobContainer) {
-                remoteIntegrityEnabled = ((AsyncMultiStreamBlobContainer) targetBlobContainer).remoteIntegrityCheckSupported();
+            if (getBlobContainer(dataFormat) instanceof AsyncMultiStreamBlobContainer) {
+                remoteIntegrityEnabled = ((AsyncMultiStreamBlobContainer) getBlobContainer(dataFormat)).remoteIntegrityCheckSupported();
             }
             lowPriorityUpload = lowPriorityUpload || contentLength > ByteSizeUnit.GB.toBytes(15);
             RemoteTransferContainer.OffsetRangeInputStreamSupplier offsetRangeInputStreamSupplier;
@@ -344,6 +307,110 @@ public class CompositeRemoteDirectory implements Closeable {
             });
 
             WriteContext writeContext = remoteTransferContainer.createWriteContext();
+            ((AsyncMultiStreamBlobContainer) getBlobContainer(dataFormat)).asyncBlobUpload(writeContext, completionListener);
+        } catch (Exception e) {
+            logger.warn("Exception while calling asyncBlobUpload, closing IndexInput to avoid leak");
+            indexInput.close();
+            throw e;
+        }
+    }
+
+    private BlobContainer getBlobContainer(String df) {
+        return formatBlobContainers.get(df);
+    }
+
+    /**
+     * Upload blob from regular Directory (similar to RemoteDirectory.uploadBlob but for Directory input)
+     */
+    private void uploadBlobFromDirectory(
+        Directory from,
+        String src,
+        String remoteFileName,
+        IOContext ioContext,
+        Runnable postUploadRunner,
+        ActionListener<Void> listener,
+        boolean lowPriorityUpload
+    ) throws Exception {
+        assert ioContext != IOContext.READONCE : "Remote upload will fail with IoContext.READONCE";
+
+        // Use default format for regular Directory sources
+        String defaultFormat = formatBlobContainers.keySet().iterator().next();
+        BlobContainer targetBlobContainer = getBlobContainerForFormat(defaultFormat);
+
+        long expectedChecksum = calculateChecksumOfChecksumFromDirectory(from, src);
+        long contentLength;
+        IndexInput indexInput = from.openInput(src, ioContext);
+        try {
+            contentLength = indexInput.length();
+            boolean remoteIntegrityEnabled = false;
+            if (targetBlobContainer instanceof AsyncMultiStreamBlobContainer) {
+                remoteIntegrityEnabled = ((AsyncMultiStreamBlobContainer) targetBlobContainer).remoteIntegrityCheckSupported();
+            }
+            lowPriorityUpload = lowPriorityUpload || contentLength > ByteSizeUnit.GB.toBytes(15);
+            RemoteTransferContainer.OffsetRangeInputStreamSupplier offsetRangeInputStreamSupplier;
+
+            if (lowPriorityUpload) {
+                offsetRangeInputStreamSupplier = (size, position) -> lowPriorityUploadRateLimiter.apply(
+                    new OffsetRangeIndexInputStream(indexInput.clone(), size, position)
+                );
+            } else {
+                offsetRangeInputStreamSupplier = (size, position) -> uploadRateLimiter.apply(
+                    new OffsetRangeIndexInputStream(indexInput.clone(), size, position)
+                );
+            }
+
+            RemoteTransferContainer remoteTransferContainer = new RemoteTransferContainer(
+                src,
+                remoteFileName,
+                contentLength,
+                true,
+                lowPriorityUpload ? WritePriority.LOW : WritePriority.NORMAL,
+                offsetRangeInputStreamSupplier,
+                expectedChecksum,
+                remoteIntegrityEnabled
+            );
+
+            ActionListener<Void> completionListener = ActionListener.wrap(resp -> {
+                try {
+                    postUploadRunner.run();
+                    listener.onResponse(null);
+                } catch (Exception e) {
+                    logger.error(() -> new ParameterizedMessage("Exception in segment postUpload for file [{}]", src), e);
+                    listener.onFailure(e);
+                }
+            }, ex -> {
+                logger.error(() -> new ParameterizedMessage("Failed to upload blob {}", src), ex);
+                IOException corruptIndexException = ExceptionsHelper.unwrapCorruption(ex);
+                if (corruptIndexException != null) {
+                    listener.onFailure(corruptIndexException);
+                    return;
+                }
+                Throwable throwable = ExceptionsHelper.unwrap(ex, CorruptFileException.class);
+                if (throwable != null) {
+                    CorruptFileException corruptFileException = (CorruptFileException) throwable;
+                    listener.onFailure(new CorruptIndexException(corruptFileException.getMessage(), corruptFileException.getFileName()));
+                    return;
+                }
+                listener.onFailure(ex);
+            });
+
+            completionListener = ActionListener.runBefore(completionListener, () -> {
+                try {
+                    remoteTransferContainer.close();
+                } catch (Exception e) {
+                    logger.warn("Error occurred while closing streams", e);
+                }
+            });
+
+            completionListener = ActionListener.runAfter(completionListener, () -> {
+                try {
+                    indexInput.close();
+                } catch (IOException e) {
+                    logger.warn("Error occurred while closing index input", e);
+                }
+            });
+
+            WriteContext writeContext = remoteTransferContainer.createWriteContext();
             ((AsyncMultiStreamBlobContainer) targetBlobContainer).asyncBlobUpload(writeContext, completionListener);
         } catch (Exception e) {
             logger.warn("Exception while calling asyncBlobUpload, closing IndexInput to avoid leak");
@@ -352,24 +419,292 @@ public class CompositeRemoteDirectory implements Closeable {
         }
     }
 
+    // Old
     private long calculateChecksumOfChecksum(CompositeStoreDirectory from, String src) throws IOException {
         return from.calculateChecksum(src);
     }
 
-    /**
-     * Generate unique remote filename - same pattern for all formats
-     */
-    private String generateRemoteFileName(String localFileName) {
-        return localFileName + SEGMENT_NAME_UUID_SEPARATOR + UUIDs.base64UUID();
+    private long calculateChecksumOfChecksum(CompositeStoreDirectory from, FileMetadata fileMetadata) throws IOException {
+        // TODO: needs implemenation
+        return from.calculateChecksum(fileMetadata);
     }
 
     /**
-     * Generic post-upload handling - same for all formats
+     * Calculate checksum for regular Directory (similar to RemoteDirectory pattern)
      */
-    private void handleSuccessfulUpload(String originalFileName, String remoteFileName,
-                                      String checksum, long fileLength, DataFormat format) {
-        logger.debug("Successfully uploaded file {} as {} for format {} (checksum: {}, length: {})",
-            originalFileName, remoteFileName, format.name(), checksum, fileLength);
+    private long calculateChecksumOfChecksumFromDirectory(Directory directory, String file) throws IOException {
+        try (IndexInput indexInput = directory.openInput(file, IOContext.READONCE)) {
+            try {
+                return RemoteTransferContainer.checksumOfChecksum(indexInput, 8); // Use 8 bytes like RemoteDirectory
+            } catch (Exception e) {
+                throw new IOException(
+                    "Potentially corrupted file: Checksum combination failed while combining stored checksum "
+                        + "and calculated checksum of stored checksum in segment file: "
+                        + file
+                        + ", directory: "
+                        + directory,
+                    e
+                );
+            }
+        }
+    }
+
+    // ===== Directory-like methods that RemoteSegmentStoreDirectory expects =====
+
+    /**
+     * Delete a file from the appropriate format-specific BlobContainers
+     * @param fileName The name of the file to delete
+     * @param format The data format
+     * @throws IOException If deletion fails
+     */
+    public void deleteFile(String fileName, String format) throws IOException {
+        List<BlobContainer> blobContainers = getBlobContainers(format);
+
+        if (blobContainers == null || blobContainers.isEmpty()) {
+            throw new IllegalStateException("No blob containers available for format: " + format);
+        }
+
+        List<IOException> exceptions = Collections.synchronizedList(new ArrayList<>());
+
+        try {
+            blobContainers.parallelStream().forEach(blobContainer -> {
+                try {
+                    blobContainer.deleteBlobsIgnoringIfNotExists(Collections.singletonList(fileName));
+                    logger.debug("Deleted file {} from container in format {}", fileName, format);
+                } catch (IOException e) {
+                    logger.error("Failed to delete file {} from container in format {}", fileName, format, e);
+                    exceptions.add(e);
+                }
+            });
+
+            // If any deletions failed, throw an exception with details
+            if (!exceptions.isEmpty()) {
+                IOException ex = new IOException(
+                    String.format("Failed to delete file %s from %d out of %d containers for format %s",
+                        fileName, exceptions.size(), blobContainers.size(), format)
+                );
+                exceptions.forEach(ex::addSuppressed);
+                throw ex;
+            }
+
+            logger.info("Successfully deleted file {} from all containers in format {}", fileName, format);
+        } catch (Exception e) {
+            throw new IOException("Error while deleting file: " + fileName, e);
+        }
+    }
+
+    private List<BlobContainer> getBlobContainers(String df)
+    {
+        List<BlobContainer> blobContainerList = List.of();
+
+        if(df!=null)
+        {
+            blobContainerList.add(getBlobContainerForFormat(df));
+        }
+        else
+        {
+            blobContainerList.addAll(formatBlobContainers.values());
+        }
+
+        return blobContainerList;
+    }
+
+    /**
+     * Find the BlobContainer where the specified file exists
+     * @param fileName The name of the file to find
+     * @param format The data format
+     * @return Optional containing the container if file exists, empty otherwise
+     * @throws IOException If there's an error checking the containers
+     */
+    private Optional<BlobContainer> findContainerForFile(String fileName, String format) throws IOException {
+        List<BlobContainer> blobContainers = getBlobContainers(format);
+
+        if (blobContainers == null || blobContainers.isEmpty()) {
+            logger.warn("No blob containers available for format: {}", format);
+            return Optional.empty();
+        }
+
+        if(blobContainers.size()==1)
+        {
+            return Optional.of(blobContainers.get(0));
+        }
+
+        try {
+            // Create parallel tasks to check each container
+            List<CompletableFuture<BlobContainer>> futures = blobContainers.stream()
+                .map(container -> CompletableFuture.supplyAsync(() -> {
+                    try {
+                        List<BlobMetadata> metadata = container.listBlobsByPrefixInSortedOrder(
+                            fileName, 1, BlobContainer.BlobNameSortOrder.LEXICOGRAPHIC);
+
+                        if (!metadata.isEmpty() && metadata.get(0).name().equals(fileName)) {
+                            return container;
+                        }
+                    } catch (IOException e) {
+                        logger.debug("Error checking file {} in container: {}", fileName, e.getMessage());
+                    }
+                    return null;
+                }))
+                .collect(Collectors.toList());
+
+            // Wait for first non-null result
+            Optional<BlobContainer> result = futures.stream()
+                .map(future -> {
+                    try {
+                        return future.get();
+                    } catch (InterruptedException | ExecutionException e) {
+                        logger.debug("Error while checking containers: {}", e.getMessage());
+                        return null;
+                    }
+                })
+                .filter(container -> container != null)
+                .findFirst();
+
+            return result;
+
+        } catch (Exception e) {
+            throw new IOException("Error while searching for file: " + fileName, e);
+        }
+    }
+
+    /**
+
+     /**
+     * Get file length from the appropriate format-specific BlobContainer
+     * @param remoteFileName The name of the file to check
+     * @param dataFormat The data format
+     * @return The length of the file
+     * @throws IOException If the file is not found or on other IO errors
+     */
+    public long fileLength(String remoteFileName, String dataFormat) throws IOException {
+        Optional<BlobContainer> containerOpt = findContainerForFile(remoteFileName, dataFormat);
+
+        if (!containerOpt.isPresent()) {
+            throw new NoSuchFileException(
+                String.format("File %s not found in any containers for format %s", remoteFileName, dataFormat)
+            );
+        }
+
+        try {
+            BlobContainer container = containerOpt.get();
+            List<BlobMetadata> metadata = container.listBlobsByPrefixInSortedOrder(
+                remoteFileName, 1, BlobContainer.BlobNameSortOrder.LEXICOGRAPHIC);
+
+            if (metadata.size() == 1 && metadata.get(0).name().equals(remoteFileName)) {
+                return metadata.get(0).length();
+            }
+
+            // This should rarely happen as findContainerForFile already checked existence
+            throw new NoSuchFileException(
+                String.format("File %s not found in container for format %s", remoteFileName, dataFormat)
+            );
+        } catch (IOException e) {
+            throw new IOException(
+                String.format("Error getting length for file %s in format %s", remoteFileName, dataFormat), e
+            );
+        }
+    }
+
+    /**
+     * Create output for writing to the appropriate format-specific BlobContainer
+     */
+    public RemoteIndexOutput createOutput(String remoteFileName, String df, IOContext context) throws IOException {
+        if (remoteFileName == null || remoteFileName.isEmpty()) {
+            throw new IllegalArgumentException("Remote file name cannot be null or empty");
+        }
+        try {
+            // Try to find existing container if file exists
+            Optional<BlobContainer> existingContainer = findContainerForFile(remoteFileName, df);
+
+            if (existingContainer.isPresent()) {
+                logger.debug("File {} already exists, using existing container", remoteFileName);
+                return new RemoteIndexOutput(remoteFileName, existingContainer.get());
+            }
+
+            throw new IOException(
+                String.format("Failed to create output for file %s in format %s", remoteFileName, df)
+            );
+        } catch (Exception e) {
+            throw new IOException(
+                String.format("Failed to create output for file %s in format %s", remoteFileName, df),
+                e
+            );
+        }
+    }
+
+    /**
+     * Open input for reading from the appropriate format-specific BlobContainer
+     */
+    public IndexInput openInput(String remoteFileName, String dataFormat, long fileLength, IOContext context) throws IOException {
+        if (remoteFileName == null || remoteFileName.isEmpty()) {
+            throw new IllegalArgumentException("Remote file name cannot be null or empty");
+        }
+
+        InputStream inputStream = null;
+        try {
+            // Try to find existing container if file exists
+            Optional<BlobContainer> existingContainer = findContainerForFile(remoteFileName, dataFormat);
+            if (existingContainer.isEmpty()) {
+                throw new IOException(String.format("Failed to find blobContainer for file %s in format %s", remoteFileName, dataFormat));
+            }
+
+            BlobContainer blobContainer = existingContainer.get();
+
+            inputStream = blobContainer.readBlob(remoteFileName);
+            UnaryOperator<InputStream> rateLimiter = downloadRateLimiterProvider.get(remoteFileName);
+            return new RemoteIndexInput(remoteFileName, rateLimiter.apply(inputStream), fileLength);
+        } catch (Exception e) {
+            if (inputStream != null) {
+                try {
+                    inputStream.close();
+                } catch (Exception closeEx) {
+                    e.addSuppressed(closeEx);
+                }
+            }
+            logger.error("Exception while reading blob for file: " + remoteFileName);
+            throw e;
+        }
+    }
+
+
+    /**
+     * Open block input for reading a specific range from the appropriate format-specific BlobContainer
+     */
+    public IndexInput openBlockInput(String remoteFileName, String dataFormat, long position, long length, long fileLength, IOContext context) throws IOException {
+        if (position < 0 || length <= 0 || (position + length > fileLength)) {
+            throw new IllegalArgumentException("Invalid values of block start and size");
+        }
+
+        try {
+            Optional<BlobContainer> existingContainer = findContainerForFile(remoteFileName, dataFormat);
+            if (existingContainer.isEmpty()) {
+                throw new IOException(String.format("Failed to find blobContainer for file %s in format %s", remoteFileName, dataFormat));
+            }
+
+            BlobContainer blobContainer = existingContainer.get();
+
+            byte[] bytes;
+            try (InputStream inputStream = blobContainer.readBlob(remoteFileName, position, length)) {
+                bytes = downloadRateLimiterProvider.get(remoteFileName).apply(inputStream).readAllBytes();
+            }
+            return new ByteArrayIndexInput(remoteFileName, bytes);
+        }
+        catch (IOException e) {
+            throw new IOException(
+                String.format("Error getting file %s in format %s", remoteFileName, dataFormat), e
+            );
+        }
+
+    }
+
+    /**
+     * Delete the entire CompositeRemoteDirectory
+     */
+    public void delete() throws IOException {
+        for (BlobContainer container : formatBlobContainers.values()) {
+            container.delete();
+        }
+        logger.debug("Deleted all format containers from CompositeRemoteDirectory");
     }
 
     /**
@@ -381,7 +716,6 @@ public class CompositeRemoteDirectory implements Closeable {
 
     @Override
     public void close() throws IOException {
-        logger.debug("Closed CompositeRemoteDirectory with {} format containers", formatBlobContainers.size());
         formatBlobContainers.clear();
     }
 
@@ -398,73 +732,9 @@ public class CompositeRemoteDirectory implements Closeable {
     }
 
     /**
-     * Input stream wrapper that calculates checksum while reading
-     */
-    private static class ChecksumCalculatingInputStream extends InputStream {
-        private final InputStream delegate;
-        private final MessageDigest digest;
-        private String checksum;
-
-        ChecksumCalculatingInputStream(InputStream delegate) throws IOException {
-            this.delegate = delegate;
-            try {
-                this.digest = MessageDigest.getInstance("SHA-256");
-            } catch (NoSuchAlgorithmException e) {
-                throw new IOException("SHA-256 algorithm not available", e);
-            }
-        }
-
-        @Override
-        public int read() throws IOException {
-            int b = delegate.read();
-            if (b != -1) {
-                digest.update((byte) b);
-            } else if (checksum == null) {
-                checksum = bytesToHex(digest.digest());
-            }
-            return b;
-        }
-
-        @Override
-        public int read(byte[] b, int off, int len) throws IOException {
-            int bytesRead = delegate.read(b, off, len);
-            if (bytesRead > 0) {
-                digest.update(b, off, bytesRead);
-            } else if (bytesRead == -1 && checksum == null) {
-                checksum = bytesToHex(digest.digest());
-            }
-            return bytesRead;
-        }
-
-        @Override
-        public void close() throws IOException {
-            delegate.close();
-            if (checksum == null) {
-                checksum = bytesToHex(digest.digest());
-            }
-        }
-
-        String getChecksum() {
-            return checksum != null ? checksum : bytesToHex(digest.digest());
-        }
-
-        private static String bytesToHex(byte[] bytes) {
-            StringBuilder result = new StringBuilder();
-            for (byte b : bytes) {
-                result.append(String.format("%02x", b));
-            }
-            return result.toString();
-        }
-    }
-
-    BlobContainer getBlobContainer(CompositeStoreDirectory from, String src) throws IOException {
-        return getBlobContainerForFormat(determineFormatFromFile(from, src));
-    }
-
-    /**
      * DownloadRateLimiterProvider returns a low-priority rate limited stream if the segment
      * being downloaded is a merged segment as part of the pre-copy (warm) phase of
-     * {@link org.opensearch.index.engine.MergedSegmentWarmer}.
+     * {@link MergedSegmentWarmer}.
      */
     private class DownloadRateLimiterProvider {
         private final UnaryOperator<InputStream> downloadRateLimiter;

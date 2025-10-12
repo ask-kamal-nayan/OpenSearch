@@ -130,6 +130,11 @@ public class RemoteSegmentTransferTracker extends RemoteTransferTracker {
     private volatile long bytesLag;
 
     /**
+     * Keeps track of format-specific upload failures for better error analysis and recovery.
+     */
+    private final Map<String, AtomicLong> formatFailureCountMap = ConcurrentCollections.newConcurrentMap();
+
+    /**
      * Holds count of consecutive failures until last success. Gets reset to zero if there is a success.
      */
     private final Streak failures = new Streak();
@@ -172,6 +177,101 @@ public class RemoteSegmentTransferTracker extends RemoteTransferTracker {
     public void incrementTotalUploadsSucceeded() {
         super.incrementTotalUploadsSucceeded();
         failures.record(false);
+    }
+
+    /**
+     * Increments the failure count for a specific format.
+     * This helps track which formats are experiencing upload issues.
+     * 
+     * @param formatName the name of the format that failed to upload
+     */
+    public void incrementFormatUploadFailure(String formatName) {
+        formatFailureCountMap.computeIfAbsent(formatName, k -> new AtomicLong(0)).incrementAndGet();
+        logger.debug("Format upload failure recorded: format={}, totalFailures={}", 
+                    formatName, formatFailureCountMap.get(formatName).get());
+    }
+
+    /**
+     * Gets the failure count for a specific format.
+     * 
+     * @param formatName the format name
+     * @return the number of upload failures for this format
+     */
+    public long getFormatUploadFailureCount(String formatName) {
+        AtomicLong count = formatFailureCountMap.get(formatName);
+        return count != null ? count.get() : 0;
+    }
+
+    /**
+     * Gets all format failure counts for monitoring and debugging.
+     * 
+     * @return a map of format names to failure counts
+     */
+    public Map<String, Long> getAllFormatFailureCounts() {
+        return formatFailureCountMap.entrySet().stream()
+            .collect(Collectors.toMap(
+                Map.Entry::getKey,
+                entry -> entry.getValue().get()
+            ));
+    }
+
+    /**
+     * Resets format-specific failure counts. This can be called after
+     * successful recovery or when starting fresh tracking.
+     */
+    public void resetFormatFailureCounts() {
+        formatFailureCountMap.clear();
+        logger.debug("Format failure counts reset");
+    }
+
+    /**
+     * Records a successful upload for a specific format with detailed metrics.
+     * This helps track format-specific performance and success rates.
+     * 
+     * @param formatName the name of the format that was successfully uploaded
+     * @param fileName the name of the file that was uploaded
+     * @param fileSize the size of the uploaded file in bytes
+     * @param uploadDurationMs the time taken to upload the file in milliseconds
+     */
+    public void recordFormatUploadSuccess(String formatName, String fileName, long fileSize, long uploadDurationMs) {
+        // Update format-specific upload counts
+        formatUploadCounts.computeIfAbsent(formatName, k -> new AtomicLong(0)).incrementAndGet();
+        
+        // Update format-specific upload bytes
+        formatUploadBytes.computeIfAbsent(formatName, k -> new AtomicLong(0)).addAndGet(fileSize);
+        
+        logger.debug("Format upload success recorded: format={}, file={}, size={} bytes, duration={} ms, " +
+                    "totalUploads={}, totalBytes={}", 
+                    formatName, fileName, fileSize, uploadDurationMs,
+                    formatUploadCounts.get(formatName).get(),
+                    formatUploadBytes.get(formatName).get());
+    }
+
+    /**
+     * Gets detailed format-specific upload statistics for monitoring and debugging.
+     * 
+     * @return a formatted string with format-specific statistics
+     */
+    public String getFormatUploadStatistics() {
+        StringBuilder stats = new StringBuilder("Format Upload Statistics:\n");
+        
+        Set<String> allFormats = new HashSet<>();
+        allFormats.addAll(formatUploadCounts.keySet());
+        allFormats.addAll(formatUploadBytes.keySet());
+        allFormats.addAll(formatFailureCountMap.keySet());
+        
+        for (String format : allFormats) {
+            long uploads = formatUploadCounts.getOrDefault(format, new AtomicLong(0)).get();
+            long bytes = formatUploadBytes.getOrDefault(format, new AtomicLong(0)).get();
+            long failures = formatFailureCountMap.getOrDefault(format, new AtomicLong(0)).get();
+            
+            double successRate = uploads + failures > 0 ? (double) uploads / (uploads + failures) * 100 : 0;
+            
+            stats.append(String.format("  %s: uploads=%d, bytes=%d, failures=%d, successRate=%.1f%%\n",
+                format, uploads, bytes, failures, successRate));
+        }
+        
+        return stats.toString();
     }
 
     public long getLocalRefreshSeqNo() {
@@ -470,7 +570,8 @@ public class RemoteSegmentTransferTracker extends RemoteTransferTracker {
             totalUploadTimeInMillis.get(),
             directoryFileTransferTracker.stats(),
             getFormatUploadCounts(),
-            getFormatUploadBytesMap()
+            getFormatUploadBytesMap(),
+            getAllFormatFailureCounts()
         );
     }
 
@@ -505,6 +606,7 @@ public class RemoteSegmentTransferTracker extends RemoteTransferTracker {
         public final DirectoryFileTransferTracker.Stats directoryFileTransferTrackerStats;
         public final Map<String, Long> formatUploadCounts;
         public final Map<String, Long> formatUploadBytes;
+        public final Map<String, Long> formatFailureCounts;
 
         public Stats(
             ShardId shardId,
@@ -529,7 +631,8 @@ public class RemoteSegmentTransferTracker extends RemoteTransferTracker {
             long totalUploadTimeInMs,
             DirectoryFileTransferTracker.Stats directoryFileTransferTrackerStats,
             Map<String, Long> formatUploadCounts,
-            Map<String, Long> formatUploadBytes
+            Map<String, Long> formatUploadBytes,
+            Map<String, Long> formatFailureCounts
         ) {
             this.shardId = shardId;
             this.localRefreshClockTimeMs = localRefreshClockTimeMs;
@@ -554,6 +657,7 @@ public class RemoteSegmentTransferTracker extends RemoteTransferTracker {
             this.directoryFileTransferTrackerStats = directoryFileTransferTrackerStats;
             this.formatUploadCounts = Collections.unmodifiableMap(formatUploadCounts);
             this.formatUploadBytes = Collections.unmodifiableMap(formatUploadBytes);
+            this.formatFailureCounts = Collections.unmodifiableMap(formatFailureCounts);
         }
 
         public Stats(StreamInput in) throws IOException {
@@ -583,6 +687,7 @@ public class RemoteSegmentTransferTracker extends RemoteTransferTracker {
                 // Read format-aware statistics (with backward compatibility)
                 this.formatUploadCounts = in.readMap(StreamInput::readString, StreamInput::readLong);
                 this.formatUploadBytes = in.readMap(StreamInput::readString, StreamInput::readLong);
+                this.formatFailureCounts = in.readMap(StreamInput::readString, StreamInput::readLong);
             } catch (IOException e) {
                 throw e;
             }
@@ -615,6 +720,7 @@ public class RemoteSegmentTransferTracker extends RemoteTransferTracker {
             // Write format-aware statistics
             out.writeMap(formatUploadCounts, StreamOutput::writeString, StreamOutput::writeLong);
             out.writeMap(formatUploadBytes, StreamOutput::writeString, StreamOutput::writeLong);
+            out.writeMap(formatFailureCounts, StreamOutput::writeString, StreamOutput::writeLong);
         }
 
         @Override
@@ -645,7 +751,8 @@ public class RemoteSegmentTransferTracker extends RemoteTransferTracker {
                 && this.totalUploadTimeInMs == other.totalUploadTimeInMs
                 && this.directoryFileTransferTrackerStats.equals(other.directoryFileTransferTrackerStats)
                 && this.formatUploadCounts.equals(other.formatUploadCounts)
-                && this.formatUploadBytes.equals(other.formatUploadBytes);
+                && this.formatUploadBytes.equals(other.formatUploadBytes)
+                && this.formatFailureCounts.equals(other.formatFailureCounts);
         }
 
         @Override
@@ -673,7 +780,8 @@ public class RemoteSegmentTransferTracker extends RemoteTransferTracker {
                 totalUploadTimeInMs,
                 directoryFileTransferTrackerStats,
                 formatUploadCounts,
-                formatUploadBytes
+                formatUploadBytes,
+                formatFailureCounts
             );
         }
 
@@ -726,6 +834,8 @@ public class RemoteSegmentTransferTracker extends RemoteTransferTracker {
                 + formatUploadCounts
                 + ", formatUploadBytes="
                 + formatUploadBytes
+                + ", formatFailureCounts="
+                + formatFailureCounts
                 + '}';
         }
     }

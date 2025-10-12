@@ -17,6 +17,7 @@ import org.apache.lucene.store.Lock;
 import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.exec.DataFormat;
+import org.opensearch.index.engine.exec.FileMetadata;
 import org.opensearch.index.engine.exec.coord.Any;
 import org.opensearch.index.shard.ShardPath;
 import org.opensearch.plugins.DataSourcePlugin;
@@ -38,6 +39,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * Composite directory that coordinates multiple format-specific directories.
@@ -151,7 +153,10 @@ public class CompositeStoreDirectory extends Directory implements FormatStoreDir
     /**
      * Routes file operation to the appropriate format directory with comprehensive format detection logging.
      * Provides detailed monitoring information for format routing decisions and troubleshooting.
+     * @deprecated Use {@link #getDirectoryForFormat(DataFormat)} with FileMetadata for format-aware routing.
+     *             This method will be removed in a future version.
      */
+    @Deprecated
     public FormatStoreDirectory getDirectoryForFile(String fileName) {
         logger.debug("Starting format detection for file: {}", fileName);
 
@@ -173,14 +178,18 @@ public class CompositeStoreDirectory extends Directory implements FormatStoreDir
         }
 
         // Enhanced error logging for format detection failures
-        logger.error("Format detection failed: file={}, checkedFormats={}, availableFormats={}",
-            fileName, checkedFormats, delegates.stream().map(d -> d.getDataFormat().name()).toList());
+        logger.warn("Format detection failed for file '{}': no format accepts this file. " +
+                   "Checked formats: {}. Available formats: {}. " +
+                   "Falling back to default format directory.",
+                   fileName, checkedFormats, delegates.stream().map(d -> d.getDataFormat().name()).toList());
 
-        // If no format accepts the file, throw an exception to avoid format bias
-//        throw new IllegalArgumentException("No format directory accepts file: " + fileName +
-//            ". Checked formats: " + checkedFormats +
-//            ". Available formats: " + delegates.stream().map(d -> d.getDataFormat().name()).toList());
-        return delegates.get(0);
+        // Fallback strategy: use the first available directory (typically Lucene)
+        FormatStoreDirectory fallbackDirectory = delegates.get(0);
+        logger.debug("Using fallback directory for file '{}': format={}, directoryType={}",
+                    fileName, fallbackDirectory.getDataFormat().name(),
+                    fallbackDirectory.getClass().getSimpleName());
+
+        return fallbackDirectory;
     }
 
     /**
@@ -192,24 +201,138 @@ public class CompositeStoreDirectory extends Directory implements FormatStoreDir
     }
 
     /**
-     * Returns directory for specific format
+     * Returns directory for specific format with proper error handling
+     * @param format the DataFormat to find a directory for
+     * @return the FormatStoreDirectory that handles the specified format
+     * @throws IllegalArgumentException if no directory is found for the format
      */
     public FormatStoreDirectory getDirectoryForFormat(DataFormat format) {
-        return delegates.stream()
+        logger.trace("Format routing request: searching for directory for format '{}'", format.name());
+
+        FormatStoreDirectory directory = delegates.stream()
             .filter(delegate -> delegate.getDataFormat().equals(format))
             .findFirst()
             .orElse(null);
+
+        if (directory == null) {
+            List<String> availableFormats = delegates.stream()
+                .map(d -> d.getDataFormat().name())
+                .toList();
+
+            logger.error("Format routing failed: requested format '{}' not found. Available formats: {}. " +
+                        "This indicates a configuration issue or missing format plugin. " +
+                        "Check that the required format plugin is installed and properly configured.",
+                        format.name(), availableFormats);
+
+            // Log additional debugging information
+            logger.debug("Format routing debug info: total delegates={}, delegate types={}",
+                        delegates.size(),
+                        delegates.stream().map(d -> d.getClass().getSimpleName()).toList());
+
+            throw FormatNotSupportedException.create(format.name(), availableFormats);
+        }
+
+        logger.debug("Format routing successful: format '{}' routed to directory type '{}' at path '{}'",
+                    format.name(), directory.getClass().getSimpleName(),
+                    directory.getDirectoryPath() != null ? directory.getDirectoryPath() : "unknown");
+
+        // Log detailed routing information for debugging
+        if (logger.isTraceEnabled()) {
+            logger.trace("Format routing details: format={}, directoryClass={}, directoryPath={}, " +
+                        "totalDelegates={}, availableFormats={}",
+                        format.name(),
+                        directory.getClass().getName(),
+                        directory.getDirectoryPath(),
+                        delegates.size(),
+                        delegates.stream().map(d -> d.getDataFormat().name()).collect(Collectors.toList()));
+        }
+
+        return directory;
+    }
+
+    /**
+     * Gets the appropriate directory for a file, with fallback to extension-based detection
+     * when FileMetadata is not available. This method provides graceful degradation
+     * for scenarios where format information is missing.
+     *
+     * @param fileName the file name to route
+     * @param fileMetadata optional FileMetadata containing format information (can be null)
+     * @return the FormatStoreDirectory that should handle this file
+     */
+    public FormatStoreDirectory getDirectoryWithFallback(String fileName, FileMetadata fileMetadata) {
+        if (fileMetadata != null) {
+            try {
+                logger.debug("Using FileMetadata for format routing: file={}, format={}",
+                            fileName, fileMetadata.df().name());
+                return getDirectoryForFormat(fileMetadata.df());
+            } catch (FormatNotSupportedException e) {
+                logger.warn("FileMetadata format not supported, falling back to extension detection: " +
+                           "file={}, requestedFormat={}, error={}",
+                           fileName, fileMetadata.df().name(), e.getMessage());
+                // Fall through to extension-based detection
+            } catch (Exception e) {
+                logger.warn("Error using FileMetadata for format routing, falling back to extension detection: " +
+                           "file={}, error={}", fileName, e.getMessage(), e);
+                // Fall through to extension-based detection
+            }
+        } else {
+            logger.debug("FileMetadata not available, using extension-based format detection for file: {}", fileName);
+        }
+
+        // Fallback to extension-based detection
+        return getDirectoryForFile(fileName);
+    }
+
+    /**
+     * Logs comprehensive format routing statistics for monitoring and debugging.
+     * This method provides detailed information about format distribution,
+     * routing performance, and potential issues.
+     */
+    public void logFormatRoutingStatistics() {
+        if (!logger.isDebugEnabled()) {
+            return;
+        }
+
+        StringBuilder stats = new StringBuilder("CompositeStoreDirectory Format Routing Statistics:\n");
+
+        // Basic information
+        stats.append(String.format("  Total format directories: %d\n", delegates.size()));
+        stats.append("  Registered formats: ").append(
+            delegates.stream()
+                .map(d -> d.getDataFormat().name())
+                .collect(Collectors.joining(", "))
+        ).append("\n");
+
+        // Directory details
+        for (FormatStoreDirectory delegate : delegates) {
+            DataFormat format = delegate.getDataFormat();
+            stats.append(String.format("  Format '%s':\n", format.name()));
+            stats.append(String.format("    - Directory class: %s\n", delegate.getClass().getSimpleName()));
+            stats.append(String.format("    - Directory path: %s\n",
+                delegate.getDirectoryPath() != null ? delegate.getDirectoryPath() : "unknown"));
+            stats.append(String.format("    - Directory name: %s\n", format.getDirectoryName()));
+        }
+
+        logger.debug(stats.toString());
     }
 
     // ===== FormatStoreDirectory<Any> Required Methods =====
 
+    /**
+     * @deprecated Use FileMetadata-based methods for format-aware operations.
+     */
     @Override
+    @Deprecated
     public OutputStream createOutput(String name) throws IOException {
         FormatStoreDirectory directory = getDirectoryForFile(name);
         return directory.createOutput(name);
     }
 
+    /**
+     * @deprecated Use FileMetadata-based methods for format-aware operations.
+     */
     @Override
+    @Deprecated
     public InputStream openInput(String name) throws IOException {
         FormatStoreDirectory directory = getDirectoryForFile(name);
         return directory.openInput(name);
@@ -261,17 +384,32 @@ public class CompositeStoreDirectory extends Directory implements FormatStoreDir
         return allFiles.toArray(new String[0]);
     }
 
+    /**
+     * @deprecated Use {@link #deleteFile(FileMetadata)} for format-aware file operations.
+     *             This method will be removed in a future version.
+     */
     @Override
+    @Deprecated
     public void deleteFile(String name) throws IOException {
         getDirectoryForFile(name).deleteFile(name);
     }
 
+    /**
+     * @deprecated Use {@link #fileLength(FileMetadata)} for format-aware file operations.
+     *             This method will be removed in a future version.
+     */
     @Override
+    @Deprecated
     public long fileLength(String name) throws IOException {
         return getDirectoryForFile(name).fileLength(name);
     }
 
+    /**
+     * @deprecated Use {@link #createOutput(FileMetadata, IOContext)} for format-aware file operations.
+     *             This method will be removed in a future version.
+     */
     @Override
+    @Deprecated
     public IndexOutput createOutput(String name, IOContext context) throws IOException {
         FormatStoreDirectory directory = getDirectoryForFile(name);
 
@@ -309,7 +447,12 @@ public class CompositeStoreDirectory extends Directory implements FormatStoreDir
         return new OutputStreamIndexOutput(outputStream, tempFileName);
     }
 
+    /**
+     * @deprecated Use {@link #openInput(FileMetadata, IOContext)} for format-aware file operations.
+     *             This method will be removed in a future version.
+     */
     @Override
+    @Deprecated
     public IndexInput openInput(String name, IOContext context) throws IOException {
         FormatStoreDirectory directory = getDirectoryForFile(name);
 
@@ -475,6 +618,11 @@ public class CompositeStoreDirectory extends Directory implements FormatStoreDir
         return calculateChecksum(fileName);
     }
 
+    public long getChecksumOfLocalFile(FileMetadata fileMetadata) throws IOException {
+        logger.debug("Getting checksum of local file: {}", fileMetadata.fileName());
+        return calculateChecksum(fileMetadata);
+    }
+
     /**
      * Get the directory file transfer tracker for this composite directory
      */
@@ -488,6 +636,160 @@ public class CompositeStoreDirectory extends Directory implements FormatStoreDir
         // For now, return empty set as FormatStoreDirectory doesn't track pending deletions
         return Set.of();
     }
+
+    // ===== FileMetadata-based Directory API Methods =====
+
+    /**
+     * Returns the byte length of a file using FileMetadata for format routing
+     * @param fileMetadata the FileMetadata containing format and filename information
+     * @return the length of the file in bytes
+     * @throws IOException if the file cannot be accessed
+     */
+    public long fileLength(FileMetadata fileMetadata) throws IOException {
+        FormatStoreDirectory formatDirectory = getDirectoryForFormat(fileMetadata.df());
+        return formatDirectory.fileLength(fileMetadata.fileName());
+    }
+
+    /**
+     * Deletes a file using FileMetadata for format routing
+     * @param fileMetadata the FileMetadata containing format and filename information
+     * @throws IOException if the file exists but could not be deleted
+     */
+    public void deleteFile(FileMetadata fileMetadata) throws IOException {
+        FormatStoreDirectory formatDirectory = getDirectoryForFormat(fileMetadata.df());
+        formatDirectory.deleteFile(fileMetadata.fileName());
+    }
+
+    /**
+     * Opens an IndexInput for reading using FileMetadata for format routing
+     * @param fileMetadata the FileMetadata containing format and filename information
+     * @param context IOContext providing performance hints for the operation
+     * @return IndexInput for reading from the file
+     * @throws IOException if the IndexInput cannot be created or file does not exist
+     */
+    public IndexInput openInput(FileMetadata fileMetadata, IOContext context) throws IOException {
+        FormatStoreDirectory formatDirectory = getDirectoryForFormat(fileMetadata.df());
+
+        // For Lucene directory, delegate directly to the wrapped Directory for better performance
+        if (formatDirectory instanceof LuceneStoreDirectory) {
+            LuceneStoreDirectory luceneDir = (LuceneStoreDirectory) formatDirectory;
+            return luceneDir.getWrappedDirectory().openInput(fileMetadata.fileName(), context);
+        }
+
+        // For generic directories, use the IndexInput adapter
+        return formatDirectory.openIndexInput(fileMetadata.fileName(), context);
+    }
+
+    /**
+     * Creates an IndexOutput for writing using FileMetadata for format routing
+     * @param fileMetadata the FileMetadata containing format and filename information
+     * @param context IOContext providing performance hints for the operation
+     * @return IndexOutput for writing to the file
+     * @throws IOException if the IndexOutput cannot be created
+     */
+    public IndexOutput createOutput(FileMetadata fileMetadata, IOContext context) throws IOException {
+        FormatStoreDirectory formatDirectory = getDirectoryForFormat(fileMetadata.df());
+
+        // For Lucene directory, delegate directly to the wrapped Directory for better performance
+        if (formatDirectory instanceof LuceneStoreDirectory) {
+            LuceneStoreDirectory luceneDir = (LuceneStoreDirectory) formatDirectory;
+            return luceneDir.getWrappedDirectory().createOutput(fileMetadata.fileName(), context);
+        }
+
+        // For generic directories, adapt OutputStream to IndexOutput
+        OutputStream outputStream = formatDirectory.createOutput(fileMetadata.fileName());
+        return new OutputStreamIndexOutput(outputStream, fileMetadata.fileName());
+    }
+
+    /**
+     * Copies a file from another directory using FileMetadata for format routing
+     * @param fileMetadata the FileMetadata containing format and filename information
+     * @param source the source Directory to copy from
+     * @param context IOContext providing performance hints for the operation
+     * @throws IOException if the copy operation fails
+     */
+    public void copyFrom(FileMetadata fileMetadata, Directory source, IOContext context) throws IOException {
+        FormatStoreDirectory targetDirectory = getDirectoryForFormat(fileMetadata.df());
+        String fileName = fileMetadata.fileName();
+
+        logger.debug("Copying file {} to format directory: {}", fileName, targetDirectory.getDataFormat().name());
+
+        // Use IndexInput/IndexOutput for the copy operation
+        try (IndexInput input = source.openInput(fileName, context);
+             IndexOutput output = createOutput(fileMetadata, context)) {
+
+            output.copyBytes(input, input.length());
+        }
+    }
+
+    /**
+     * Checks if a file exists using FileMetadata for format routing
+     * @param fileMetadata the FileMetadata containing format and filename information
+     * @return true if the file exists, false otherwise
+     * @throws IOException if the existence check fails
+     */
+    public boolean fileExists(FileMetadata fileMetadata) throws IOException {
+        FormatStoreDirectory formatDirectory = getDirectoryForFormat(fileMetadata.df());
+        return formatDirectory.fileExists(fileMetadata.fileName());
+    }
+
+    /**
+     * Calculates checksum using FileMetadata for format routing
+     * @param fileMetadata the FileMetadata containing format and filename information
+     * @return the checksum as a long value
+     * @throws IOException if checksum calculation fails
+     */
+    public long calculateChecksum(FileMetadata fileMetadata) throws IOException {
+        FormatStoreDirectory formatDirectory = getDirectoryForFormat(fileMetadata.df());
+        return formatDirectory.calculateChecksum(fileMetadata.fileName());
+    }
+
+    /**
+     * Creates an upload input stream using FileMetadata for format routing
+     * @param fileMetadata the FileMetadata containing format and filename information
+     * @return InputStream for reading the complete file content
+     * @throws IOException if the input stream cannot be created
+     */
+    public InputStream createUploadInputStream(FileMetadata fileMetadata) throws IOException {
+        FormatStoreDirectory formatDirectory = getDirectoryForFormat(fileMetadata.df());
+        return formatDirectory.createUploadInputStream(fileMetadata.fileName());
+    }
+
+    /**
+     * Creates a range-based upload input stream using FileMetadata for format routing
+     * @param fileMetadata the FileMetadata containing format and filename information
+     * @param offset the starting byte offset within the file
+     * @param length the number of bytes to read from the offset
+     * @return InputStream for reading the specified byte range
+     * @throws IOException if the range stream cannot be created
+     */
+    public InputStream createUploadRangeInputStream(FileMetadata fileMetadata, long offset, long length) throws IOException {
+        FormatStoreDirectory formatDirectory = getDirectoryForFormat(fileMetadata.df());
+        return formatDirectory.createUploadRangeInputStream(fileMetadata.fileName(), offset, length);
+    }
+
+    /**
+     * Calculates upload checksum using FileMetadata for format routing
+     * @param fileMetadata the FileMetadata containing format and filename information
+     * @return checksum string in format-specific representation
+     * @throws IOException if checksum calculation fails
+     */
+    public String calculateUploadChecksum(FileMetadata fileMetadata) throws IOException {
+        FormatStoreDirectory formatDirectory = getDirectoryForFormat(fileMetadata.df());
+        return formatDirectory.calculateUploadChecksum(fileMetadata.fileName());
+    }
+
+    /**
+     * Performs post-upload operations using FileMetadata for format routing
+     * @param fileMetadata the FileMetadata containing format and filename information
+     * @param remoteFileName the name/path of the file in remote storage
+     * @throws IOException if post-upload operations fail
+     */
+    public void onUploadComplete(FileMetadata fileMetadata, String remoteFileName) throws IOException {
+        FormatStoreDirectory formatDirectory = getDirectoryForFormat(fileMetadata.df());
+        formatDirectory.onUploadComplete(fileMetadata.fileName(), remoteFileName);
+    }
+
 }
 
 /**

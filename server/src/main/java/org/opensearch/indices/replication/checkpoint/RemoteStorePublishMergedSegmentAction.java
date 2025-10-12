@@ -148,7 +148,7 @@ public class RemoteStorePublishMergedSegmentAction extends AbstractPublishCheckp
             .stream()
             .collect(Collectors.toMap(Map.Entry::getKey, e -> e.getValue().length()));
         final CountDownLatch latch = new CountDownLatch(1);
-        getRemoteStoreUploaderService(indexShard).uploadSegments(segmentsToUpload, segmentsSizeMap, new ActionListener<>() {
+        getRemoteStoreUploaderService(indexShard).uploadSegmentsLegacy(segmentsToUpload, segmentsSizeMap, new ActionListener<>() {
             @Override
             public void onResponse(Void unused) {
                 logger.trace(() -> new ParameterizedMessage("Successfully uploaded segments {} to remote store", segmentsToUpload));
