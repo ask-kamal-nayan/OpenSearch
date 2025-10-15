@@ -46,7 +46,6 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.NoSuchFileException;
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
@@ -59,7 +58,6 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.stream.Collectors;
 
 /**
  * Remote segment store directory with format-aware storage capabilities.
@@ -325,13 +323,26 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
 
     /**
      * Opens a stream for reading one block from the existing file - always uses compositeRemoteDirectory
-     * TODO: needs update
      */
     public IndexInput openBlockInput(String name, long position, long length, IOContext context) throws IOException {
         String remoteFilename = getExistingRemoteFilename(name);
         if (remoteFilename != null) {
             long fileLength = compositeRemoteDirectory.fileLength(name, null);
             return compositeRemoteDirectory.openBlockInput(remoteFilename, null, position, length, fileLength, context);
+        } else {
+            throw new NoSuchFileException(name);
+        }
+    }
+
+    /**
+     * Opens a stream for reading one block from the existing file - always uses compositeRemoteDirectory
+     * TODO: needs update, currently it's not integrated
+     */
+    public IndexInput openBlockInput(String name, String dfName, long position, long length, IOContext context) throws IOException {
+        String remoteFilename = getExistingRemoteFilename(name);
+        if (remoteFilename != null) {
+            long fileLength = compositeRemoteDirectory.fileLength(name, dfName);
+            return compositeRemoteDirectory.openBlockInput(remoteFilename, dfName, position, length, fileLength, context);
         } else {
             throw new NoSuchFileException(name);
         }
@@ -386,7 +397,7 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
     }
 
     private void postUpload(CompositeStoreDirectory from, FileMetadata fileMetadata, String remoteFilename, String checksum) throws IOException {
-        UploadedSegmentMetadata segmentMetadata = new UploadedSegmentMetadata(fileMetadata.fileName(), remoteFilename, checksum, from.fileLength(fileMetadata));
+        UploadedSegmentMetadata segmentMetadata = new UploadedSegmentMetadata(fileMetadata.fileName(), remoteFilename, checksum, from.fileLength(fileMetadata), fileMetadata.df().name());
         segmentsUploadedToRemoteStore.put(fileMetadata.fileName(), segmentMetadata);
     }
 
@@ -413,7 +424,7 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
                     long fileLength = from.fileLength(fileMetadata);
 
                     UploadedSegmentMetadata metadata = new UploadedSegmentMetadata(
-                        fileName, remoteFileName, checksum, fileLength);
+                        fileName, remoteFileName, checksum, fileLength, fileMetadata.df().name());
                     segmentsUploadedToRemoteStore.put(fileName, metadata);
 
                     logger.debug("Cache updated after upload: file={}, format={}, checksum={}, length={}",
@@ -696,26 +707,35 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
         private final String originalFilename;
         private final String uploadedFilename;
         private final String checksum;
+        private final String dataFormat;
         private final long length;
         private int writtenByMajor;
 
-        UploadedSegmentMetadata(String originalFilename, String uploadedFilename, String checksum, long length) {
+        UploadedSegmentMetadata(String originalFilename, String uploadedFilename, String checksum, long length, String dataFormat) {
             this.originalFilename = originalFilename;
             this.uploadedFilename = uploadedFilename;
             this.checksum = checksum;
             this.length = length;
+            this.dataFormat = dataFormat;
         }
 
         @Override
         public String toString() {
-            return String.join(SEPARATOR, originalFilename, uploadedFilename, checksum,
-                             String.valueOf(length), String.valueOf(writtenByMajor));
+            return String.join(SEPARATOR,
+                originalFilename,
+                uploadedFilename,
+                checksum,
+                String.valueOf(length),
+                String.valueOf(writtenByMajor),
+                dataFormat
+            );
         }
 
         public String getChecksum() { return this.checksum; }
         public long getLength() { return this.length; }
         public String getOriginalFilename() { return originalFilename; }
         public String getUploadedFilename() { return uploadedFilename; }
+        public String getDataFormat() { return dataFormat; }
 
         public void setWrittenByMajor(int writtenByMajor) {
             if (writtenByMajor <= Version.LATEST.major && writtenByMajor >= Version.MIN_SUPPORTED_MAJOR) {
@@ -727,10 +747,24 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
 
         public static UploadedSegmentMetadata fromString(String uploadedFilename) {
             String[] values = uploadedFilename.split(SEPARATOR);
-            UploadedSegmentMetadata metadata = new UploadedSegmentMetadata(values[0], values[1], values[2], Long.parseLong(values[3]));
+
+            // Extract dataFormat from position 5, default to "lucene" for backward compatibility
+            String dataFormat = values.length >= 6 ? values[5] : "lucene";
+
+            // Use correct 5-parameter constructor including dataFormat
+            UploadedSegmentMetadata metadata = new UploadedSegmentMetadata(
+                values[0],                  // originalFilename
+                values[1],                  // uploadedFilename
+                values[2],                  // checksum
+                Long.parseLong(values[3]),  // length
+                dataFormat                  // dataFormat
+            );
+
+            // Set writtenByMajor if present
             if (values.length >= 5) {
                 metadata.setWrittenByMajor(Integer.parseInt(values[4]));
             }
+
             return metadata;
         }
     }

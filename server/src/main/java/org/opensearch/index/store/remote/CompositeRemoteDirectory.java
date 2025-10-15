@@ -86,6 +86,7 @@ public class CompositeRemoteDirectory implements Closeable {
     private final BlobStore blobStore;
     private final BlobPath baseBlobPath;
     private final Logger logger;
+    private  final Any any;
 
     /**
      * Full constructor with all rate limiter parameters
@@ -98,7 +99,8 @@ public class CompositeRemoteDirectory implements Closeable {
         UnaryOperator<InputStream> downloadRateLimiter,
         UnaryOperator<InputStream> lowPriorityDownloadRateLimiter,
         Map<String, String> pendingDownloadMergedSegments,
-        Logger logger
+        Logger logger,
+        Any dataFormats
     ) {
         this.formatBlobContainers = new ConcurrentHashMap<>();
         this.blobStore = blobStore;
@@ -108,39 +110,7 @@ public class CompositeRemoteDirectory implements Closeable {
         this.downloadRateLimiterProvider = new DownloadRateLimiterProvider(downloadRateLimiter, lowPriorityDownloadRateLimiter);
         this.pendingDownloadMergedSegments = pendingDownloadMergedSegments;
         this.logger = logger;
-
-        logger.debug("Created CompositeRemoteDirectory with lazy BlobContainer creation at base path: {}",
-            baseBlobPath);
-    }
-
-    /**
-     * Creates CompositeRemoteDirectory with lazy BlobContainer creation per format.
-     *
-     * @param blobStore the underlying blob store for creating format-specific containers
-     * @param baseBlobPath base path for all format containers
-     * @param logger logger for this composite directory
-     */
-    public CompositeRemoteDirectory(
-        BlobStore blobStore,
-        BlobPath baseBlobPath,
-        Logger logger
-    ) {
-        this(blobStore, baseBlobPath, UnaryOperator.identity(), UnaryOperator.identity(),
-             UnaryOperator.identity(), UnaryOperator.identity(), null, logger);
-    }
-
-    /**
-     * Constructor following RemoteDirectory pattern for multiple formats
-     * Creates BlobContainers for each format - similar to RemoteDirectory but with multiple containers
-     */
-    public CompositeRemoteDirectory(
-        BlobStore blobStore,
-        BlobPath baseBlobPath,
-        Any dataFormats,
-        Logger logger
-    ) {
-        this(blobStore, baseBlobPath, UnaryOperator.identity(), UnaryOperator.identity(),
-             UnaryOperator.identity(), UnaryOperator.identity(), null, logger);
+        this.any = dataFormats;
 
         // Eagerly create BlobContainers for each format
         for (DataFormat format : dataFormats.getDataFormats()) {

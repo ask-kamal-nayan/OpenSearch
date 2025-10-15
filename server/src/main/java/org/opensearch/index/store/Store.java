@@ -221,6 +221,22 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
         ShardPath shardPath,
         PluginsService pluginsService
     ) {
+        this(shardId, indexSettings, directory, shardLock, onClose, shardPath, pluginsService, null);
+    }
+
+    /**
+     * Constructor with factory-created CompositeStoreDirectory
+     */
+    public Store(
+        ShardId shardId,
+        IndexSettings indexSettings,
+        Directory directory,
+        ShardLock shardLock,
+        OnClose onClose,
+        ShardPath shardPath,
+        PluginsService pluginsService,
+        CompositeStoreDirectory factoryCreatedCompositeDirectory
+    ) {
         super(shardId, indexSettings);
 
         // Use mock PluginsService if none provided
@@ -232,11 +248,18 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
         logger.debug("store stats are refreshed with refresh_interval [{}]", refreshInterval);
         ByteSizeCachingDirectory sizeCachingDir = new ByteSizeCachingDirectory(directory, refreshInterval);
         this.directory = new StoreDirectory(sizeCachingDir, Loggers.getLogger("index.store.deletes", shardId));
-        // Create CompositeStoreDirectory following CompositeIndexingExecutionEngine pattern
-        List<DataFormat> formats = List.of(DataFormat.LUCENE, DataFormat.TEXT);
-        Any dataFormats = new Any(formats);
-        this.compositeStoreDirectory = new CompositeStoreDirectory(indexSettings, actualPluginsService, dataFormats, actualShardPath, logger);
-        logger.debug("Created CompositeStoreDirectory with plugin-based discovery");
+
+        // Use factory-created CompositeStoreDirectory if provided, otherwise create internally
+        if (factoryCreatedCompositeDirectory != null) {
+            this.compositeStoreDirectory = factoryCreatedCompositeDirectory;
+            logger.debug("Using factory-created CompositeStoreDirectory");
+        } else {
+            // Fallback to internal creation for backward compatibility
+            List<DataFormat> formats = List.of(DataFormat.LUCENE, DataFormat.PARQUET);
+            Any dataFormats = new Any(formats);
+            this.compositeStoreDirectory = new CompositeStoreDirectory(indexSettings, actualPluginsService, dataFormats, actualShardPath, logger);
+            logger.debug("Created CompositeStoreDirectory with plugin-based discovery (fallback)");
+        }
 
         this.shardLock = shardLock;
         this.onClose = onClose;
