@@ -8,5 +8,5 @@
 
 package org.opensearch.index.engine.exec;
 
-public record FileMetadata(String directory, String file) {
+public record FileMetadata(String dataFormat, String directory, String file) {
 }

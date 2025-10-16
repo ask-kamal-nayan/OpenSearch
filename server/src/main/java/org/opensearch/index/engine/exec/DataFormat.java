@@ -15,6 +15,7 @@ import org.opensearch.index.engine.exec.text.TextDF;
 
 @ExperimentalApi
 public interface DataFormat {
+
     Setting<Settings> dataFormatSettings();
 
     Setting<Settings> clusterLeveldataFormatSettings();
@@ -94,7 +95,7 @@ public interface DataFormat {
     /**
      * Returns the DataFormat instance for the given name.
      * This method provides compatibility with enum-like valueOf behavior.
-     * 
+     *
      * @param name the format name
      * @return the DataFormat instance
      * @throws IllegalArgumentException if the format name is not recognized

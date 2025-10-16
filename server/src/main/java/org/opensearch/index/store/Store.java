@@ -255,7 +255,7 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
             logger.debug("Using factory-created CompositeStoreDirectory");
         } else {
             // Fallback to internal creation for backward compatibility
-            List<DataFormat> formats = List.of(DataFormat.LUCENE, DataFormat.PARQUET);
+            List<DataFormat> formats = List.of(DataFormat.PARQUET);
             Any dataFormats = new Any(formats);
             this.compositeStoreDirectory = new CompositeStoreDirectory(indexSettings, actualPluginsService, dataFormats, actualShardPath, logger);
             logger.debug("Created CompositeStoreDirectory with plugin-based discovery (fallback)");

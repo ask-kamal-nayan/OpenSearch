@@ -361,9 +361,9 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
      */
     public void copyFrom(CompositeStoreDirectory from, FileMetadata src, IOContext context, ActionListener<Void> listener, boolean lowPriorityUpload) {
         try {
-            final String remoteFileName = getNewRemoteSegmentFilename(src.fileName());
+            final String remoteFileName = getNewRemoteSegmentFilename(src.file());
             boolean uploaded = false;
-            if (src.fileName().startsWith(IndexFileNames.SEGMENTS) == false) {
+            if (src.file().startsWith(IndexFileNames.SEGMENTS) == false) {
                 uploaded = compositeRemoteDirectory.copyFrom(from, src, remoteFileName, context, () -> {
                     try {
                         postUpload(from, src, remoteFileName, Long.toString(from.getChecksumOfLocalFile(src)));
@@ -373,7 +373,7 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
                 }, listener, lowPriorityUpload);
             }
             if (uploaded == false) {
-                copyFrom(from, src, src.fileName(), context);
+                copyFrom(from, src, src.file(), context);
                 listener.onResponse(null);
             }
         } catch (Exception e) {
@@ -397,8 +397,8 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
     }
 
     private void postUpload(CompositeStoreDirectory from, FileMetadata fileMetadata, String remoteFilename, String checksum) throws IOException {
-        UploadedSegmentMetadata segmentMetadata = new UploadedSegmentMetadata(fileMetadata.fileName(), remoteFilename, checksum, from.fileLength(fileMetadata), fileMetadata.df().name());
-        segmentsUploadedToRemoteStore.put(fileMetadata.fileName(), segmentMetadata);
+        UploadedSegmentMetadata segmentMetadata = new UploadedSegmentMetadata(fileMetadata.file(), remoteFilename, checksum, from.fileLength(fileMetadata), fileMetadata.directory());
+        segmentsUploadedToRemoteStore.put(fileMetadata.file(), segmentMetadata);
     }
 
     // ===== Primary FileMetadata-based copyFrom API =====
@@ -410,11 +410,11 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
     public void copyFrom(FileMetadata fileMetadata, CompositeStoreDirectory from,
                         IOContext context, ActionListener<Void> listener, boolean lowPriorityUpload) {
 
-        String fileName = fileMetadata.fileName();
+        String fileName = fileMetadata.file();
         String remoteFileName = getNewRemoteSegmentFilename(fileName);
 
         logger.debug("FileMetadata-based upload initiated: file={}, format={}, remoteFileName={}",
-                    fileName, fileMetadata.df().name(), remoteFileName);
+                    fileName, fileMetadata.dataFormat(), remoteFileName);
 
         try {
             // Create postUploadRunner for cache updates using CompositeStoreDirectory FileMetadata methods
@@ -424,14 +424,14 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
                     long fileLength = from.fileLength(fileMetadata);
 
                     UploadedSegmentMetadata metadata = new UploadedSegmentMetadata(
-                        fileName, remoteFileName, checksum, fileLength, fileMetadata.df().name());
+                        fileName, remoteFileName, checksum, fileLength, fileMetadata.dataFormat());
                     segmentsUploadedToRemoteStore.put(fileName, metadata);
 
                     logger.debug("Cache updated after upload: file={}, format={}, checksum={}, length={}",
-                                fileName, fileMetadata.df().name(), checksum, fileLength);
+                                fileName, fileMetadata.dataFormat(), checksum, fileLength);
                 } catch (IOException e) {
                     logger.error("Post-upload cache update failed: file={}, format={}, error={}",
-                                fileName, fileMetadata.df().name(), e.getMessage(), e);
+                                fileName, fileMetadata.dataFormat(), e.getMessage(), e);
                     throw new RuntimeException("Post-upload processing failed", e);
                 }
             };
@@ -442,14 +442,14 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
 
             if (!uploaded) {
                 logger.warn("Upload not supported by BlobContainer for file={}, format={}",
-                           fileName, fileMetadata.df().name());
+                           fileName, fileMetadata.dataFormat());
                 listener.onFailure(new IOException("Upload not supported by BlobContainer"));
             }
         } catch (Exception e) {
             logger.error("FileMetadata-based upload failed: file={}, format={}, error={}",
-                        fileName, fileMetadata.df().name(), e.getMessage(), e);
+                        fileName, fileMetadata.dataFormat(), e.getMessage(), e);
             listener.onFailure(new SegmentUploadFailedException(
-                String.format("Failed to upload file %s with format %s", fileName, fileMetadata.df().name()), e));
+                String.format("Failed to upload file %s with format %s", fileName, fileMetadata.dataFormat()), e));
         }
     }
 

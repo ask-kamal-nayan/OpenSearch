@@ -66,11 +66,12 @@ ${path.logs}
 # The default list of hosts is ["127.0.0.1", "[::1]"]
 #
 #discovery.seed_hosts: ["host1", "host2"]
+discovery.seed_hosts: ["node-1"]
 #
 # Bootstrap the cluster using an initial set of cluster-manager-eligible nodes:
 #
 #cluster.initial_cluster_manager_nodes: ["node-1", "node-2"]
-#
+cluster.initial_cluster_manager_nodes: ["node-1"]
 # For more information, consult the discovery and cluster formation module documentation.
 #
 # ---------------------------------- Gateway -----------------------------------
@@ -121,3 +122,15 @@ ${path.logs}
 # Once there is no observed impact on performance, this feature flag can be removed.
 #
 #opensearch.experimental.optimization.datetime_formatter_caching.enabled: false
+node.roles: [ cluster_manager,data ]
+node.attr.remote_store.segment.repository: my-repo-1
+node.attr.remote_store.translog.repository: my-repo-1
+node.attr.remote_store.state.repository: my-repo-1
+cluster.remote_store.state.enabled: true
+node.attr.remote_store.repository.my-repo-1.type: fs
+path.repo: /Users/askkamal/Documents/remote-store-repo
+node.attr.remote_store.repository.my-repo-1.settings.location: /Users/askkamal/Documents/remote-store-repo
+
+node.name: "node-1"
+cluster.name: my-application
+network.host: 0.0.0.0

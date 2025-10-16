@@ -17,8 +17,6 @@ import org.opensearch.index.engine.DataFormatPlugin;
 import org.opensearch.index.engine.exec.DataFormat;
 import org.opensearch.index.engine.exec.IndexingExecutionEngine;
 import org.opensearch.index.shard.ShardPath;
-import org.opensearch.index.store.remote.FormatRemoteDirectory;
-import org.opensearch.index.store.remote.LuceneRemoteDirectory;
 
 import java.io.IOException;
 import java.util.Set;

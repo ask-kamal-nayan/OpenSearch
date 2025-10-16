@@ -13,7 +13,6 @@ import org.apache.lucene.store.FSDirectory;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.DataFormatPlugin;
 import org.opensearch.index.engine.exec.DataFormat;
-import org.opensearch.index.engine.exec.coord.Any;
 import org.opensearch.index.shard.ShardPath;
 import org.opensearch.plugins.PluginsService;
 

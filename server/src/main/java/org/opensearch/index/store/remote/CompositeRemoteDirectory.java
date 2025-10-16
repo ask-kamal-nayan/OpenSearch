@@ -149,7 +149,7 @@ public class CompositeRemoteDirectory implements Closeable {
         throws IOException {
         boolean success = false;
         try (IndexInput is = from.openInput(src, IOContext.READONCE);
-             IndexOutput os = createOutput(dest, src.df().name(), context)) {
+             IndexOutput os = createOutput(dest, src.directory(), context)) {
             os.copyBytes(is, is.length());
             success = true;
         } finally {
@@ -172,14 +172,12 @@ public class CompositeRemoteDirectory implements Closeable {
         boolean lowPriorityUpload
     ) {
         try {
-            // Extract format and filename from FileMetadata
-            DataFormat format = fileMetadata.df();
-            String fileName = fileMetadata.fileName();
-            BlobContainer blobContainer = getBlobContainerForFormat(format.name());
+            String fileName = fileMetadata.file();
+            BlobContainer blobContainer = getBlobContainerForFormat(fileMetadata.directory());
 
             if (blobContainer instanceof AsyncMultiStreamBlobContainer) {
                 logger.debug("Starting format-aware upload: file={}, format={}, container={}",
-                           fileName, format.name(), blobContainer.path());
+                           fileName, fileMetadata.directory(), blobContainer.path());
                 uploadBlob(from, fileMetadata, remoteFileName, context, postUploadRunner, listener, lowPriorityUpload);
                 return true;
             }
@@ -188,7 +186,7 @@ public class CompositeRemoteDirectory implements Closeable {
             return false;
 
         } catch (Exception e) {
-            logger.error("Failed to start format-aware upload: file={}, error={}", fileMetadata.fileName(), e.getMessage(), e);
+            logger.error("Failed to start format-aware upload: file={}, error={}", fileMetadata.directory(), e.getMessage(), e);
             listener.onFailure(e);
             return true;  // Return true to indicate we handled it (even though it failed)
         }
@@ -204,7 +202,7 @@ public class CompositeRemoteDirectory implements Closeable {
         boolean lowPriorityUpload
     ) throws Exception {
         assert ioContext != IOContext.READONCE : "Remote upload will fail with IoContext.READONCE";
-        String dataFormat = src.df().name();
+        String dataFormat = src.directory();
         long expectedChecksum = calculateChecksumOfChecksum(from, src);
         long contentLength;
         IndexInput indexInput = from.openInput(src, ioContext);

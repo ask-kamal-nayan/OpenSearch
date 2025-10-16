@@ -66,17 +66,17 @@ public class RemoteStoreUploaderService implements RemoteStoreUploader {
         // Log format-aware upload statistics
         Map<String, Long> formatCounts = fileMetadataCollection.stream()
             .collect(Collectors.groupingBy(
-                fm -> fm.df().name(),
+                fm -> fm.dataFormat(),
                 Collectors.counting()
             ));
-        
+
         Map<String, Long> formatSizes = fileMetadataCollection.stream()
             .collect(Collectors.groupingBy(
-                fm -> fm.df().name(),
-                Collectors.summingLong(fm -> localSegmentsSizeMap.getOrDefault(fm.fileName(), 0L))
+                fm -> fm.dataFormat(),
+                Collectors.summingLong(fm -> localSegmentsSizeMap.getOrDefault(fm.file(), 0L))
             ));
-        
-        logger.debug("Format-aware segment upload starting: totalFiles={}, formatCounts={}, formatSizes={}", 
+
+        logger.debug("Format-aware segment upload starting: totalFiles={}, formatCounts={}, formatSizes={}",
                     fileMetadataCollection.size(), formatCounts, formatSizes);
         ActionListener<Collection<Void>> mappedListener = ActionListener.map(listener, resp -> null);
         GroupedActionListener<Void> batchUploadListener = new GroupedActionListener<>(mappedListener, fileMetadataCollection.size());
@@ -84,47 +84,47 @@ public class RemoteStoreUploaderService implements RemoteStoreUploader {
         Directory directory = storeDirectory;
 
         for (FileMetadata fileMetadata : fileMetadataCollection) {
-            String fileName = fileMetadata.fileName();
+            String fileName = fileMetadata.file();
             // Initializing listener here to ensure that the stats increment operations are thread-safe
             UploadListener statsListener = uploadListenerFunction.apply(localSegmentsSizeMap);
             ActionListener<Void> aggregatedListener = ActionListener.wrap(resp -> {
                 statsListener.onSuccess(fileName);
                 batchUploadListener.onResponse(resp);
-                
+
                 // Log format-specific upload success
                 long fileSize = localSegmentsSizeMap.getOrDefault(fileName, 0L);
-                logger.debug("Format-aware upload completed: file={}, format={}, size={} bytes", 
-                            fileName, fileMetadata.df().name(), fileSize);
-                
+                logger.debug("Format-aware upload completed: file={}, format={}, size={} bytes",
+                            fileName, fileMetadata.dataFormat(), fileSize);
+
                 // Once uploaded to Remote, local files become eligible for eviction from FileCache
                 if (directory instanceof CompositeDirectory) {
                     ((CompositeDirectory) directory).afterSyncToRemote(fileName);
                 }
             }, ex -> {
                 logger.warn(() -> new ParameterizedMessage("Exception: [{}] while uploading segment files", ex), ex);
-                
+
                 // Handle different types of upload failures with format-aware tracking
                 if (ex instanceof CorruptIndexException) {
                     indexShard.failShard(ex.getMessage(), ex);
                 } else if (ex instanceof FormatNotSupportedException) {
-                    logger.error("Format not supported for file upload: file={}, format={}, error={}", 
-                                fileName, fileMetadata.df().name(), ex.getMessage());
+                    logger.error("Format not supported for file upload: file={}, format={}, error={}",
+                                fileName, fileMetadata.dataFormat(), ex.getMessage());
                     // Track format-specific failure
-                    trackFormatFailure(fileMetadata.df().name(), "format_not_supported");
+                    trackFormatFailure(fileMetadata.dataFormat(), "format_not_supported");
                     // For format not supported errors, don't retry - fail immediately
                 } else if (ex instanceof SegmentUploadFailedException) {
-                    logger.error("Segment upload failed: file={}, format={}, error={}", 
-                                fileName, fileMetadata.df().name(), ex.getMessage());
+                    logger.error("Segment upload failed: file={}, format={}, error={}",
+                                fileName, fileMetadata.dataFormat(), ex.getMessage());
                     // Track format-specific failure
-                    trackFormatFailure(fileMetadata.df().name(), "upload_failed");
+                    trackFormatFailure(fileMetadata.dataFormat(), "upload_failed");
                     // Could implement retry logic here in the future
                 } else {
-                    logger.warn("Unexpected upload failure: file={}, format={}, error={}", 
-                               fileName, fileMetadata.df().name(), ex.getMessage(), ex);
+                    logger.warn("Unexpected upload failure: file={}, format={}, error={}",
+                               fileName, fileMetadata.dataFormat(), ex.getMessage(), ex);
                     // Track format-specific failure
-                    trackFormatFailure(fileMetadata.df().name(), "unexpected_error");
+                    trackFormatFailure(fileMetadata.dataFormat(), "unexpected_error");
                 }
-                
+
                 statsListener.onFailure(fileName);
                 batchUploadListener.onFailure(ex);
             });
@@ -187,7 +187,7 @@ public class RemoteStoreUploaderService implements RemoteStoreUploader {
      * Tracks format-specific upload failures for monitoring and recovery purposes.
      * This helps identify which formats are experiencing issues and enables
      * format-specific error recovery strategies.
-     * 
+     *
      * @param formatName the name of the format that failed
      * @param failureType the type of failure (for logging purposes)
      */
@@ -197,14 +197,14 @@ public class RemoteStoreUploaderService implements RemoteStoreUploader {
             // This assumes RemoteStoreRefreshListener exposes the segment tracker
             // In a real implementation, we might need to pass the tracker as a dependency
             logger.debug("Tracking format failure: format={}, failureType={}", formatName, failureType);
-            
+
             // For now, just log the failure. In a complete implementation, we would:
             // 1. Get access to RemoteSegmentTransferTracker
             // 2. Call incrementFormatUploadFailure(formatName)
             // 3. Potentially trigger format-specific recovery logic
-            
+
         } catch (Exception e) {
-            logger.warn("Failed to track format failure: format={}, failureType={}, error={}", 
+            logger.warn("Failed to track format failure: format={}, failureType={}, error={}",
                        formatName, failureType, e.getMessage(), e);
         }
     }

@@ -110,7 +110,7 @@ public class RemoteTransferContainer implements Closeable {
         boolean isRemoteDataIntegritySupported
     ) {
         this(
-            fileMetadata.fileName(),
+            fileMetadata.file(),
             remoteFileName,
             contentLength,
             failTransferIfFileExists,
@@ -119,7 +119,7 @@ public class RemoteTransferContainer implements Closeable {
             expectedChecksum,
             isRemoteDataIntegritySupported,
             null,
-            fileMetadata.df().name()
+            fileMetadata.dataFormat()
         );
     }
 

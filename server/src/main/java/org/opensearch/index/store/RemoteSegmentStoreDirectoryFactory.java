@@ -190,16 +190,15 @@ public class RemoteSegmentStoreDirectoryFactory implements IndexStorePlugin.Dire
                 // For now, use simplified approach with default formats
                 // In production, this would use proper plugin discovery mechanism
                 java.util.List<DataFormat> discoveredFormats = new ArrayList<>();
-                discoveredFormats.add(DataFormat.LUCENE); // Always include Lucene
                 discoveredFormats.add(DataFormat.PARQUET);   // Add Text as fallback
                 return new Any(discoveredFormats);
             } catch (Exception e) {
                 // Fallback to default formats if plugin discovery fails
-                return new Any(java.util.List.of(DataFormat.LUCENE, DataFormat.PARQUET));
+                return new Any(java.util.List.of(DataFormat.PARQUET));
             }
         } else {
             // Use default formats when no PluginsService available
-            return new Any(java.util.List.of(DataFormat.LUCENE, DataFormat.PARQUET));
+            return new Any(java.util.List.of(DataFormat.PARQUET));
         }
     }
 

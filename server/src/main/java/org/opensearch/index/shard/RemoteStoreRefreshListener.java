@@ -258,12 +258,12 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
                     long lastRefreshedCheckpoint = ((InternalEngine) indexShard.getEngine()).lastRefreshedCheckpoint();
 
                     // Use FileMetadata from catalog snapshot instead of extracting segments from SegmentInfos
-                    Collection<FileMetadata> fileMetadataCollection = indexShard.getCatalogSnapshotFromEngine().getAllSearchableFiles();
+                    Collection<FileMetadata> fileMetadataCollection = indexShard.getCatalogSnapshotFromEngine().getFileMetadataList();
 
                     // Log format-aware statistics
                     Map<String, Long> formatCounts = fileMetadataCollection.stream()
                         .collect(Collectors.groupingBy(
-                            fm -> fm.df().name(),
+                            fm -> fm.dataFormat(),
                             Collectors.counting()
                         ));
 
@@ -272,7 +272,7 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
 
                     // Extract file names for backward compatibility with existing code
                     Collection<String> localSegmentsPostRefresh = fileMetadataCollection.stream()
-                        .map(FileMetadata::fileName)
+                        .map(FileMetadata::file)
                         .collect(Collectors.toList());
 
                     // Create a map of file name to size and update the refresh segment tracker
@@ -389,14 +389,14 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
         // Log format-aware upload statistics
         Map<String, Long> uploadFormatCounts = filteredFileMetadata.stream()
             .collect(Collectors.groupingBy(
-                fm -> fm.df().name(),
+                fm -> fm.dataFormat(),
                 Collectors.counting()
             ));
 
         Map<String, Long> skippedFormatCounts = fileMetadataCollection.stream()
             .filter(fileMetadata -> skipUpload(fileMetadata))
             .collect(Collectors.groupingBy(
-                fm -> fm.df().name(),
+                fm -> fm.directory(),
                 Collectors.counting()
             ));
 
@@ -546,11 +546,11 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
     private boolean skipUpload(FileMetadata fileMetadata) {
         try {
             // Exclude files that are already uploaded and the exclude files to come up with the list of files to be uploaded.
-            return EXCLUDE_FILES.contains(fileMetadata.fileName()) || remoteDirectory.containsFile(fileMetadata.fileName(), getChecksumOfLocalFile(fileMetadata));
+            return EXCLUDE_FILES.contains(fileMetadata.directory()) || remoteDirectory.containsFile(fileMetadata.directory(), getChecksumOfLocalFile(fileMetadata));
         } catch (IOException e) {
             logger.error(
                 "Exception while reading checksum of local segment file: {}, ignoring the exception and re-uploading the file",
-                fileMetadata.fileName()
+                fileMetadata.file()
             );
         }
         return false;
@@ -567,16 +567,16 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
     }
 
     private String getChecksumOfLocalFile(FileMetadata fileMetadata) throws IOException {
-        if (!localSegmentChecksumMap.containsKey(fileMetadata.fileName())) {
+        if (!localSegmentChecksumMap.containsKey(fileMetadata.file())) {
             try{
                 String checksum = Long.toString(compositeStoreDirectory.calculateChecksum(fileMetadata));
-                localSegmentChecksumMap.put(fileMetadata.fileName(), checksum);
+                localSegmentChecksumMap.put(fileMetadata.file(), checksum);
             }
             catch (IOException e){
                 logger.info("Exception ", e);
             }
         }
-        return localSegmentChecksumMap.get(fileMetadata.fileName());
+        return localSegmentChecksumMap.get(fileMetadata.file());
     }
 
     /**

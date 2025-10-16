@@ -56,6 +56,8 @@ public class CompositeStoreDirectory extends Directory implements FormatStoreDir
     private Any dataFormat;
     private final Path directoryPath;
     public final List<FormatStoreDirectory<?>> delegates = new ArrayList<>();
+    public final HashMap<String, FormatStoreDirectory<?>> delegatesMap  = new HashMap<>();
+
     private final Logger logger;
     private final DirectoryFileTransferTracker directoryFileTransferTracker;
     private final ShardPath shardPath;
@@ -72,10 +74,11 @@ public class CompositeStoreDirectory extends Directory implements FormatStoreDir
         try {
             for (DataFormat dataFormat : dataFormats.getDataFormats()) {
                 DataSourcePlugin plugin = pluginsService.filterPlugins(DataSourcePlugin.class).stream()
-                    .filter(curr -> curr.getDataFormat().equals(dataFormat.name()))
+                    .filter(curr -> curr.getDataFormat().equals(dataFormat))
                     .findFirst()
                     .orElseThrow(() -> new IllegalArgumentException("dataformat [" + dataFormat + "] is not registered."));
                 delegates.add(plugin.createFormatStoreDirectory(indexSettings, shardPath));
+                delegatesMap.put(dataFormat.name(), delegates.get(delegates.size() - 1));
             }
         } catch (NullPointerException e) {
             // Fallback - same as CompositeIndexingExecutionEngine
@@ -251,6 +254,39 @@ public class CompositeStoreDirectory extends Directory implements FormatStoreDir
     }
 
     /**
+     * Gets the FormatStoreDirectory for a specific data format by name.
+     * Uses the delegatesMap to find the appropriate directory delegate.
+     *
+     * @param dataFormatName the name of the data format (e.g., "lucene", "parquet", "text")
+     * @return the FormatStoreDirectory that handles the specified format
+     * @throws IllegalArgumentException if no directory is found for the format
+     */
+    public FormatStoreDirectory<?> getDirectoryForFormat(String dataFormatName) {
+        logger.trace("Format routing request: searching for directory for format '{}'", dataFormatName);
+
+        FormatStoreDirectory<?> directory = delegatesMap.get(dataFormatName);
+
+        if (directory == null) {
+            List<String> availableFormats = new ArrayList<>(delegatesMap.keySet());
+
+            logger.error("Format routing failed: requested format '{}' not found. Available formats: {}. " +
+                    "This indicates a configuration issue or missing format plugin.",
+                dataFormatName, availableFormats);
+
+            throw new IllegalArgumentException(
+                String.format("No directory found for format '%s'. Available formats: %s",
+                    dataFormatName, availableFormats)
+            );
+        }
+
+        logger.debug("Format routing successful: format '{}' routed to directory type '{}'",
+            dataFormatName, directory.getClass().getSimpleName());
+
+        return directory;
+    }
+
+
+    /**
      * Gets the appropriate directory for a file, with fallback to extension-based detection
      * when FileMetadata is not available. This method provides graceful degradation
      * for scenarios where format information is missing.
@@ -263,12 +299,12 @@ public class CompositeStoreDirectory extends Directory implements FormatStoreDir
         if (fileMetadata != null) {
             try {
                 logger.debug("Using FileMetadata for format routing: file={}, format={}",
-                            fileName, fileMetadata.df().name());
-                return getDirectoryForFormat(fileMetadata.df());
+                            fileName, fileMetadata.dataFormat());
+                return getDirectoryForFormat(fileMetadata.dataFormat());
             } catch (FormatNotSupportedException e) {
                 logger.warn("FileMetadata format not supported, falling back to extension detection: " +
                            "file={}, requestedFormat={}, error={}",
-                           fileName, fileMetadata.df().name(), e.getMessage());
+                           fileName, fileMetadata.dataFormat(), e.getMessage());
                 // Fall through to extension-based detection
             } catch (Exception e) {
                 logger.warn("Error using FileMetadata for format routing, falling back to extension detection: " +
@@ -619,7 +655,7 @@ public class CompositeStoreDirectory extends Directory implements FormatStoreDir
     }
 
     public long getChecksumOfLocalFile(FileMetadata fileMetadata) throws IOException {
-        logger.debug("Getting checksum of local file: {}", fileMetadata.fileName());
+        logger.debug("Getting checksum of local file: {}", fileMetadata.file());
         return calculateChecksum(fileMetadata);
     }
 
@@ -646,8 +682,8 @@ public class CompositeStoreDirectory extends Directory implements FormatStoreDir
      * @throws IOException if the file cannot be accessed
      */
     public long fileLength(FileMetadata fileMetadata) throws IOException {
-        FormatStoreDirectory formatDirectory = getDirectoryForFormat(fileMetadata.df());
-        return formatDirectory.fileLength(fileMetadata.fileName());
+        FormatStoreDirectory formatDirectory = getDirectoryForFormat(fileMetadata.dataFormat());
+        return formatDirectory.fileLength(fileMetadata.file());
     }
 
     /**
@@ -656,8 +692,8 @@ public class CompositeStoreDirectory extends Directory implements FormatStoreDir
      * @throws IOException if the file exists but could not be deleted
      */
     public void deleteFile(FileMetadata fileMetadata) throws IOException {
-        FormatStoreDirectory formatDirectory = getDirectoryForFormat(fileMetadata.df());
-        formatDirectory.deleteFile(fileMetadata.fileName());
+        FormatStoreDirectory formatDirectory = getDirectoryForFormat(fileMetadata.dataFormat());
+        formatDirectory.deleteFile(fileMetadata.file());
     }
 
     /**
@@ -668,16 +704,16 @@ public class CompositeStoreDirectory extends Directory implements FormatStoreDir
      * @throws IOException if the IndexInput cannot be created or file does not exist
      */
     public IndexInput openInput(FileMetadata fileMetadata, IOContext context) throws IOException {
-        FormatStoreDirectory formatDirectory = getDirectoryForFormat(fileMetadata.df());
+        FormatStoreDirectory formatDirectory = getDirectoryForFormat(fileMetadata.dataFormat());
 
         // For Lucene directory, delegate directly to the wrapped Directory for better performance
         if (formatDirectory instanceof LuceneStoreDirectory) {
             LuceneStoreDirectory luceneDir = (LuceneStoreDirectory) formatDirectory;
-            return luceneDir.getWrappedDirectory().openInput(fileMetadata.fileName(), context);
+            return luceneDir.getWrappedDirectory().openInput(fileMetadata.file(), context);
         }
 
         // For generic directories, use the IndexInput adapter
-        return formatDirectory.openIndexInput(fileMetadata.fileName(), context);
+        return formatDirectory.openIndexInput(fileMetadata.file(), context);
     }
 
     /**
@@ -688,17 +724,17 @@ public class CompositeStoreDirectory extends Directory implements FormatStoreDir
      * @throws IOException if the IndexOutput cannot be created
      */
     public IndexOutput createOutput(FileMetadata fileMetadata, IOContext context) throws IOException {
-        FormatStoreDirectory formatDirectory = getDirectoryForFormat(fileMetadata.df());
+        FormatStoreDirectory formatDirectory = getDirectoryForFormat(fileMetadata.dataFormat());
 
         // For Lucene directory, delegate directly to the wrapped Directory for better performance
         if (formatDirectory instanceof LuceneStoreDirectory) {
             LuceneStoreDirectory luceneDir = (LuceneStoreDirectory) formatDirectory;
-            return luceneDir.getWrappedDirectory().createOutput(fileMetadata.fileName(), context);
+            return luceneDir.getWrappedDirectory().createOutput(fileMetadata.file(), context);
         }
 
         // For generic directories, adapt OutputStream to IndexOutput
-        OutputStream outputStream = formatDirectory.createOutput(fileMetadata.fileName());
-        return new OutputStreamIndexOutput(outputStream, fileMetadata.fileName());
+        OutputStream outputStream = formatDirectory.createOutput(fileMetadata.file());
+        return new OutputStreamIndexOutput(outputStream, fileMetadata.file());
     }
 
     /**
@@ -709,8 +745,8 @@ public class CompositeStoreDirectory extends Directory implements FormatStoreDir
      * @throws IOException if the copy operation fails
      */
     public void copyFrom(FileMetadata fileMetadata, Directory source, IOContext context) throws IOException {
-        FormatStoreDirectory targetDirectory = getDirectoryForFormat(fileMetadata.df());
-        String fileName = fileMetadata.fileName();
+        FormatStoreDirectory targetDirectory = getDirectoryForFormat(fileMetadata.dataFormat());
+        String fileName = fileMetadata.file();
 
         logger.debug("Copying file {} to format directory: {}", fileName, targetDirectory.getDataFormat().name());
 
@@ -729,8 +765,8 @@ public class CompositeStoreDirectory extends Directory implements FormatStoreDir
      * @throws IOException if the existence check fails
      */
     public boolean fileExists(FileMetadata fileMetadata) throws IOException {
-        FormatStoreDirectory formatDirectory = getDirectoryForFormat(fileMetadata.df());
-        return formatDirectory.fileExists(fileMetadata.fileName());
+        FormatStoreDirectory formatDirectory = getDirectoryForFormat(fileMetadata.dataFormat());
+        return formatDirectory.fileExists(fileMetadata.file());
     }
 
     /**
@@ -740,8 +776,8 @@ public class CompositeStoreDirectory extends Directory implements FormatStoreDir
      * @throws IOException if checksum calculation fails
      */
     public long calculateChecksum(FileMetadata fileMetadata) throws IOException {
-        FormatStoreDirectory formatDirectory = getDirectoryForFormat(fileMetadata.df());
-        return formatDirectory.calculateChecksum(fileMetadata.fileName());
+        FormatStoreDirectory formatDirectory = getDirectoryForFormat(fileMetadata.dataFormat());
+        return formatDirectory.calculateChecksum(fileMetadata.file());
     }
 
     /**
@@ -751,8 +787,8 @@ public class CompositeStoreDirectory extends Directory implements FormatStoreDir
      * @throws IOException if the input stream cannot be created
      */
     public InputStream createUploadInputStream(FileMetadata fileMetadata) throws IOException {
-        FormatStoreDirectory formatDirectory = getDirectoryForFormat(fileMetadata.df());
-        return formatDirectory.createUploadInputStream(fileMetadata.fileName());
+        FormatStoreDirectory formatDirectory = getDirectoryForFormat(fileMetadata.dataFormat());
+        return formatDirectory.createUploadInputStream(fileMetadata.file());
     }
 
     /**
@@ -764,8 +800,8 @@ public class CompositeStoreDirectory extends Directory implements FormatStoreDir
      * @throws IOException if the range stream cannot be created
      */
     public InputStream createUploadRangeInputStream(FileMetadata fileMetadata, long offset, long length) throws IOException {
-        FormatStoreDirectory formatDirectory = getDirectoryForFormat(fileMetadata.df());
-        return formatDirectory.createUploadRangeInputStream(fileMetadata.fileName(), offset, length);
+        FormatStoreDirectory formatDirectory = getDirectoryForFormat(fileMetadata.dataFormat());
+        return formatDirectory.createUploadRangeInputStream(fileMetadata.file(), offset, length);
     }
 
     /**
@@ -775,8 +811,8 @@ public class CompositeStoreDirectory extends Directory implements FormatStoreDir
      * @throws IOException if checksum calculation fails
      */
     public String calculateUploadChecksum(FileMetadata fileMetadata) throws IOException {
-        FormatStoreDirectory formatDirectory = getDirectoryForFormat(fileMetadata.df());
-        return formatDirectory.calculateUploadChecksum(fileMetadata.fileName());
+        FormatStoreDirectory formatDirectory = getDirectoryForFormat(fileMetadata.dataFormat());
+        return formatDirectory.calculateUploadChecksum(fileMetadata.file());
     }
 
     /**
@@ -786,8 +822,8 @@ public class CompositeStoreDirectory extends Directory implements FormatStoreDir
      * @throws IOException if post-upload operations fail
      */
     public void onUploadComplete(FileMetadata fileMetadata, String remoteFileName) throws IOException {
-        FormatStoreDirectory formatDirectory = getDirectoryForFormat(fileMetadata.df());
-        formatDirectory.onUploadComplete(fileMetadata.fileName(), remoteFileName);
+        FormatStoreDirectory formatDirectory = getDirectoryForFormat(fileMetadata.dataFormat());
+        formatDirectory.onUploadComplete(fileMetadata.file(), remoteFileName);
     }
 
 }

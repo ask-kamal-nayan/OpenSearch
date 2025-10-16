@@ -44,7 +44,6 @@ public class DefaultCompositeStoreDirectoryFactory implements CompositeStoreDire
      * Includes Lucene (primary format) and Text (fallback format).
      */
     private static final List<DataFormat> DEFAULT_FORMATS = Arrays.asList(
-        DataFormat.LUCENE,
         DataFormat.PARQUET
     );
 

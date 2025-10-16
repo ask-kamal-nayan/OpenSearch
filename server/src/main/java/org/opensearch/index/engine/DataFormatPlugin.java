@@ -16,7 +16,6 @@ import org.opensearch.index.mapper.MapperService;
 import org.opensearch.index.shard.ShardPath;
 import org.opensearch.index.store.FormatStoreDirectory;
 import org.opensearch.index.store.RemoteDirectory;
-import org.opensearch.index.store.remote.FormatRemoteDirectory;
 
 import java.io.IOException;
 
@@ -36,19 +35,5 @@ public interface DataFormatPlugin  {
         IndexSettings indexSettings,
         ShardPath shardPath
     )throws IOException;
-    /**
-     * Creates a format-specific remote directory for remote storage operations.
-     * This method enables the plugin to provide custom remote directory implementations
-     * for format-specific remote storage requirements.
-     *
-     * @param indexSettings     the index settings
-     * @param baseBlobContainer the base blob container for remote storage
-     * @param remoteBasePath    the base path for remote storage
-     * @return FormatRemoteDirectory instance for this format
-     */
-    FormatRemoteDirectory createFormatRemoteDirectory(
-        IndexSettings indexSettings,
-        BlobContainer baseBlobContainer,
-        String remoteBasePath
-    )throws IOException;
+
 }

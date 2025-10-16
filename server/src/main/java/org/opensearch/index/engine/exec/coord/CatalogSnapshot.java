@@ -12,12 +12,10 @@ import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.common.util.concurrent.AbstractRefCounted;
 import org.opensearch.index.engine.exec.RefreshResult;
 import org.opensearch.index.engine.exec.WriterFileSet;
+import org.opensearch.index.engine.exec.FileMetadata;
 
 import java.io.Serializable;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.*;
 
 @ExperimentalApi
 public class CatalogSnapshot extends AbstractRefCounted {
@@ -48,17 +46,28 @@ public class CatalogSnapshot extends AbstractRefCounted {
         return Collections.unmodifiableCollection(segmentMap.values());
     }
 
-    /**
-     * Get all searchable files across all formats.
-     * This method aggregates FileMetadata from all data formats into a single collection.
-     * 
-     * @return Collection containing all FileMetadata from all formats
-     */
-    public Collection<FileMetadata> getAllSearchableFiles() {
-        return dfGroupedSearchableFiles.values()
-            .stream()
-            .flatMap(Collection::stream)
-            .toList();
+    public Collection<FileMetadata> getFileMetadataList() {
+        Collection<Segment> segments = getSegments();
+        Collection<FileMetadata> allFileMetadata = new ArrayList<>();
+
+        for (Segment segment : segments) {
+            // Each segment contains multiple data formats
+            segment.dfGroupedSearchableFiles.forEach((dataFormatName, writerFileSet) -> {
+                String directory = writerFileSet.getDirectory();
+
+                // Create FileMetadata for each file in this WriterFileSet
+                for (String fileName : writerFileSet.getFiles()) {
+                    FileMetadata fileMetadata = new FileMetadata(
+                        dataFormatName,  // String dataFormat
+                        directory,       // String directory
+                        fileName        // String file
+                    );
+                    allFileMetadata.add(fileMetadata);
+                }
+            });
+        }
+
+        return allFileMetadata;
     }
 
     @Override
