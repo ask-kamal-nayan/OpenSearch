@@ -255,7 +255,7 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
             logger.debug("Using factory-created CompositeStoreDirectory");
         } else {
             // Fallback to internal creation for backward compatibility
-            List<DataFormat> formats = List.of(DataFormat.PARQUET);
+            List<DataFormat> formats = List.of(DataFormat.LUCENE);
             Any dataFormats = new Any(formats);
             this.compositeStoreDirectory = new CompositeStoreDirectory(indexSettings, actualPluginsService, dataFormats, actualShardPath, logger);
             logger.debug("Created CompositeStoreDirectory with plugin-based discovery (fallback)");
@@ -2025,13 +2025,13 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
     }
 
     /**
-     * Simple mock PluginsService that provides empty plugin list
-     * CompositeStoreDirectory will use fallback logic when no plugins are found
+     * Mock PluginsService that provides Lucene data format plugin
+     * This ensures CompositeStoreDirectory can find the LuceneDataFormatPlugin
      */
     public static class MockPluginsServiceWithFormats extends PluginsService {
 
         /**
-         * Creates a mock PluginsService - CompositeStoreDirectory handles fallback
+         * Creates a mock PluginsService with Lucene data format plugin
          */
         public MockPluginsServiceWithFormats() {
             super(Settings.EMPTY, null, null, null, Collections.emptyList());
@@ -2040,7 +2040,13 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
         @Override
         @SuppressWarnings("unchecked")
         public <T> List<T> filterPlugins(Class<T> type) {
-            // Return empty list - CompositeStoreDirectory has fallback logic
+            if (type == org.opensearch.plugins.DataSourcePlugin.class) {
+                // Return Lucene plugin instance (Parquet will be loaded from modules in production)
+                List<org.opensearch.plugins.DataSourcePlugin> plugins = new ArrayList<>();
+                plugins.add(LuceneDataFormatPlugin.INSTANCE);
+                return (List<T>) plugins;
+            }
+            // For other plugin types, return empty list
             return Collections.emptyList();
         }
     }

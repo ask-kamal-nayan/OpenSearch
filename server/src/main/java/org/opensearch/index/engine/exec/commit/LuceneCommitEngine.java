@@ -55,6 +55,11 @@ public class LuceneCommitEngine implements Committer {
 
     @Override
     public CommitPoint commit(CatalogSnapshot catalogSnapshot) {
+
+        if(catalogSnapshot == null) {
+            catalogSnapshot = new CatalogSnapshot(null, 0);
+        }
+
         addLuceneIndexes(catalogSnapshot);
         try {
             indexWriter.commit();
