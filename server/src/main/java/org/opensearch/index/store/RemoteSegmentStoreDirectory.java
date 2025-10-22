@@ -42,6 +42,7 @@ import org.opensearch.indices.replication.checkpoint.ReplicationCheckpoint;
 import org.opensearch.node.remotestore.RemoteStorePinnedTimestampService;
 import org.opensearch.threadpool.ThreadPool;
 
+import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
@@ -481,6 +482,11 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
             && segmentsUploadedToRemoteStore.get(localFilename).checksum.equals(checksum);
     }
 
+    public boolean containsFile(FileMetadata fileMetadata, String checksum) {
+        return segmentsUploadedToRemoteStore.containsKey(localFilename)
+            && segmentsUploadedToRemoteStore.get(localFilename).checksum.equals(checksum);
+    }
+
     public String getExistingRemoteFilename(String localFilename) {
         if (segmentsUploadedToRemoteStore.containsKey(localFilename)) {
             return segmentsUploadedToRemoteStore.get(localFilename).uploadedFilename;
@@ -502,19 +508,19 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
         return Collections.unmodifiableMap(this.segmentsUploadedToRemoteStore);
     }
 
-    // ===== Metadata and cleanup operations =====
-
     public void uploadMetadata(Collection<String> segmentFiles, SegmentInfos segmentInfosSnapshot,
-                              Directory storeDirectory, long translogGeneration,
-                              ReplicationCheckpoint replicationCheckpoint, String nodeId) throws IOException {
+                               CompositeStoreDirectory storeDirectory, long translogGeneration,
+                               ReplicationCheckpoint replicationCheckpoint, String nodeId) throws IOException {
         synchronized (this) {
             String metadataFilename = MetadataFilenameUtils.getMetadataFilename(
                 replicationCheckpoint.getPrimaryTerm(), segmentInfosSnapshot.getGeneration(),
                 translogGeneration, metadataUploadCounter.incrementAndGet(),
                 RemoteSegmentMetadata.CURRENT_VERSION, nodeId);
 
+            FileMetadata fileMetadata = new FileMetadata("TempMetadata","", metadataFilename);
+
             try {
-                try (IndexOutput indexOutput = storeDirectory.createOutput(metadataFilename, IOContext.DEFAULT)) {
+                try (IndexOutput indexOutput = storeDirectory.createOutput(fileMetadata, IOContext.DEFAULT)) {
                     Map<String, Integer> segmentToLuceneVersion = getSegmentToLuceneVersion(segmentFiles, segmentInfosSnapshot);
                     Map<String, String> uploadedSegments = new HashMap<>();
 
@@ -541,10 +547,10 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
                         segmentInfoSnapshotByteArray, replicationCheckpoint));
                 }
 
-                storeDirectory.sync(Collections.singleton(metadataFilename));
-                remoteMetadataDirectory.copyFrom(storeDirectory, metadataFilename, metadataFilename, IOContext.DEFAULT);
+                storeDirectory.sync(Collections.singleton(fileMetadata));
+                compositeRemoteDirectory.copyFrom(storeDirectory, fileMetadata, metadataFilename, IOContext.DEFAULT);
             } finally {
-                tryAndDeleteLocalFile(metadataFilename, storeDirectory);
+                tryAndDeleteLocalFile(fileMetadata, storeDirectory);
             }
         }
     }
@@ -685,13 +691,13 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
         return segmentToLuceneVersion;
     }
 
-    private void tryAndDeleteLocalFile(String filename, Directory directory) {
+    private void tryAndDeleteLocalFile(FileMetadata fileMetadata, CompositeStoreDirectory directory) {
         try {
-            directory.deleteFile(filename);
+            directory.deleteFile(fileMetadata);
         } catch (NoSuchFileException | FileNotFoundException e) {
-            logger.trace("Exception while deleting. Missing file : " + filename, e);
+            logger.trace("Exception while deleting. Missing file : " + fileMetadata.file(), e);
         } catch (IOException e) {
-            logger.warn("Exception while deleting: " + filename, e);
+            logger.warn("Exception while deleting: " + fileMetadata.file(), e);
         }
     }
 

@@ -342,34 +342,6 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
     }
 
     /**
-     * Temporary code
-     * Extracts parquet file names from SegmentInfos
-     *
-     * @param segmentInfos the SegmentInfos object containing segment metadata
-     * @return List of parquet file names
-     */
-    private Collection<String> extractSegments(SegmentInfos segmentInfos) throws IOException {
-        Collection<String> pfiles = new ArrayList<>();
-        for (SegmentCommitInfo segmentInfo : segmentInfos) {
-            String parquetFile = segmentInfo.info.getAttribute("parquet_file");
-            if (parquetFile != null) {
-
-                logger.info("Remote stale segments [{}]", parquetFile);
-                var fileName = parquetFile.substring(parquetFile.lastIndexOf("/") + 1);
-                // If checksum is stored in attributes, cache it
-                long checksum = compositeStoreDirectory.getChecksumOfLocalFile(fileName);
-                logger.debug("Cached checksum from SegmentInfo for parquet file {}: {}", fileName, checksum);
-                pfiles.add(fileName);
-            }
-        }
-
-        Collection<String> localSegmentsPostRefresh = segmentInfos.files(true);
-        pfiles.addAll(localSegmentsPostRefresh);
-
-        return pfiles;
-    }
-
-    /**
      * Uploads new segment files to the remote store.
      *
      * @param fileMetadataCollection collection of FileMetadata objects containing format and file information
@@ -477,9 +449,11 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
     }
 
     private boolean isRefreshAfterCommit() throws IOException {
-        String lastCommittedLocalSegmentFileName = SegmentInfos.getLastCommitSegmentsFileName(compositeStoreDirectory);
-        return (lastCommittedLocalSegmentFileName != null
-            && !remoteDirectory.containsFile(lastCommittedLocalSegmentFileName, getChecksumOfLocalFile(lastCommittedLocalSegmentFileName)));
+        // ToDo: Get last commit generation from catalogSnapshot
+        // String lastCommittedLocalSegmentFileName = SegmentInfos.getLastCommitSegmentsFileName(compositeStoreDirectory);
+//        return (lastCommittedLocalSegmentFileName != null
+//            && !remoteDirectory.containsFile(lastCommittedLocalSegmentFileName, getChecksumOfLocalFile(lastCommittedLocalSegmentFileName)));
+        return true;
     }
 
     /**
@@ -527,17 +501,17 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
     /**
      * Whether to upload a file or not depending on whether file is in excluded list or has been already uploaded.
      *
-     * @param file that needs to be uploaded.
+     * @param fileMetadata that needs to be uploaded.
      * @return true if the upload has to be skipped for the file.
      */
-    private boolean skipUpload(String file) {
+    private boolean skipUpload(FileMetadata fileMetadata) {
         try {
             // Exclude files that are already uploaded and the exclude files to come up with the list of files to be uploaded.
-            return EXCLUDE_FILES.contains(file) || remoteDirectory.containsFile(file, getChecksumOfLocalFile(file));
+            return EXCLUDE_FILES.contains(fileMetadata.file()) || remoteDirectory.containsFile(fileMetadata, getChecksumOfLocalFile(fileMetadata));
         } catch (IOException e) {
             logger.error(
                 "Exception while reading checksum of local segment file: {}, ignoring the exception and re-uploading the file",
-                file
+                fileMetadata.file()
             );
         }
         return false;
@@ -556,15 +530,6 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
         return false;
     }
 
-    private String getChecksumOfLocalFile(String file) throws IOException {
-        if (!localSegmentChecksumMap.containsKey(file)) {
-            try (IndexInput indexInput = compositeStoreDirectory.openInput(file, IOContext.READONCE)) {
-                String checksum = Long.toString(compositeStoreDirectory.calculateChecksum(file));
-                localSegmentChecksumMap.put(file, checksum);
-            }
-        }
-        return localSegmentChecksumMap.get(file);
-    }
 
     private String getChecksumOfLocalFile(FileMetadata fileMetadata) throws IOException {
         if (!localSegmentChecksumMap.containsKey(fileMetadata.file())) {

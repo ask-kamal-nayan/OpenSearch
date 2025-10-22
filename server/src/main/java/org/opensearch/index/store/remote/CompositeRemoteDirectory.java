@@ -83,6 +83,7 @@ public class CompositeRemoteDirectory implements Closeable {
 
     // Core architecture: Direct BlobContainer per format with lazy creation
     private final Map<String, BlobContainer> formatBlobContainers;
+    private  final BlobContainer metadataBlobContainer;
     private final BlobStore blobStore;
     private final BlobPath baseBlobPath;
     private final Logger logger;
@@ -111,6 +112,9 @@ public class CompositeRemoteDirectory implements Closeable {
         this.pendingDownloadMergedSegments = pendingDownloadMergedSegments;
         this.logger = logger;
         this.any = dataFormats;
+
+        BlobPath metadataBlobPath = baseBlobPath.add("metadata");
+        this.metadataBlobContainer = blobStore.blobContainer(metadataBlobPath);
 
         // Eagerly create BlobContainers for each format
         for (DataFormat format : dataFormats.getDataFormats()) {

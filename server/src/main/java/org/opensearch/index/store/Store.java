@@ -1773,7 +1773,7 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
         StoreDirectory directory = this.directory;
         for (String file : files) {
             try {
-                compositeStoreDirectory.deleteFile(file);
+                // ToDo: CompositeDirectory needs FileMetadata
                 directory.deleteFile(file);
             } catch (Exception ex) {
                 // ignore :(

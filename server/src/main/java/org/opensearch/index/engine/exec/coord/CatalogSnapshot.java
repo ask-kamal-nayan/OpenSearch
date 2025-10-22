@@ -27,7 +27,9 @@ public class CatalogSnapshot extends AbstractRefCounted {
         super("catalog_snapshot");
         this.id = id;
         this.dfGroupedSearchableFiles = new HashMap<>();
-        refreshResult.getRefreshedFiles().forEach((dataFormat, writerFiles) -> dfGroupedSearchableFiles.put(dataFormat.name(), writerFiles));
+        if (refreshResult != null) {
+            refreshResult.getRefreshedFiles().forEach((dataFormat, writerFiles) -> dfGroupedSearchableFiles.put(dataFormat.name(), writerFiles));
+        }
     }
 
     public Collection<WriterFileSet> getSearchableFiles(String dataFormat) {

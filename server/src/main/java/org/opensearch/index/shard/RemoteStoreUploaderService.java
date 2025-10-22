@@ -42,10 +42,18 @@ public class RemoteStoreUploaderService implements RemoteStoreUploader {
     private final CompositeStoreDirectory storeDirectory;
     private final RemoteSegmentStoreDirectory remoteDirectory;
 
+    // Todo: Remove
     public RemoteStoreUploaderService(IndexShard indexShard, Directory storeDirectory, RemoteSegmentStoreDirectory remoteDirectory) {
         logger = Loggers.getLogger(getClass(), indexShard.shardId());
         this.indexShard = indexShard;
-        this.storeDirectory = (CompositeStoreDirectory) storeDirectory;
+        this.storeDirectory =  null;
+        this.remoteDirectory = remoteDirectory;
+    }
+
+    public RemoteStoreUploaderService(IndexShard indexShard, CompositeStoreDirectory storeDirectory, RemoteSegmentStoreDirectory remoteDirectory) {
+        logger = Loggers.getLogger(getClass(), indexShard.shardId());
+        this.indexShard = indexShard;
+        this.storeDirectory =  storeDirectory;
         this.remoteDirectory = remoteDirectory;
     }
 
