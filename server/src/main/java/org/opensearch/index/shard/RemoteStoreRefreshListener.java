@@ -39,6 +39,7 @@ import org.opensearch.indices.replication.checkpoint.ReplicationCheckpoint;
 import org.opensearch.indices.replication.checkpoint.SegmentReplicationCheckpointPublisher;
 import org.opensearch.threadpool.ThreadPool;
 
+import java.io.File;
 import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
@@ -81,11 +82,10 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
     public static final Set<String> EXCLUDE_FILES = Set.of("write.lock");
 
     private final IndexShard indexShard;
-    private final Directory storeDirectory;
     private final CompositeStoreDirectory compositeStoreDirectory;
     private final RemoteSegmentStoreDirectory remoteDirectory;
     private final RemoteSegmentTransferTracker segmentTracker;
-    private final Map<String, String> localSegmentChecksumMap;
+    private final Map<FileMetadata, String> localSegmentChecksumMap;
     private volatile long primaryTerm;
     private volatile Iterator<TimeValue> backoffDelayIterator;
     private final SegmentReplicationCheckpointPublisher checkpointPublisher;
@@ -101,7 +101,6 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
         super(indexShard.getThreadPool());
         logger = Loggers.getLogger(getClass(), indexShard.shardId());
         this.indexShard = indexShard;
-        this.storeDirectory = indexShard.store().directory();
         this.compositeStoreDirectory = indexShard.store().compositeStoreDirectory();
         this.remoteDirectory = (RemoteSegmentStoreDirectory) ((FilterDirectory) ((FilterDirectory) indexShard.remoteStore().directory())
             .getDelegate()).getDelegate();
@@ -135,10 +134,9 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
         if (shouldSync(didRefresh, true) && isReadyForUpload()) {
             try {
                 segmentTracker.updateLocalRefreshTimeAndSeqNo();
-                try (GatedCloseable<SegmentInfos> segmentInfosGatedCloseable = indexShard.getSegmentInfosSnapshot()) {
-                    Collection<String> localSegmentsPostRefresh = segmentInfosGatedCloseable.get().files(true);
-                    updateLocalSizeMapAndTracker(localSegmentsPostRefresh);
-                }
+                // Use FileMetadata from catalog snapshot
+                Collection<FileMetadata> fileMetadataCollection = indexShard.getCatalogSnapshotFromEngine().getFileMetadataList();
+                updateLocalSizeMapAndTracker(fileMetadataCollection);
             } catch (Throwable t) {
                 logger.error("Exception in runAfterRefreshExactlyOnce() method", t);
             }
@@ -204,8 +202,10 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
      * @return true iff all the local files are uploaded to remote store.
      */
     boolean isRemoteSegmentStoreInSync() {
-        try (GatedCloseable<SegmentInfos> segmentInfosGatedCloseable = indexShard.getSegmentInfosSnapshot()) {
-            return segmentInfosGatedCloseable.get().files(true).stream().allMatch(this::skipUpload);
+        try {
+            // Use FileMetadata from catalog snapshot instead of just filenames
+            Collection<FileMetadata> localFiles = indexShard.getCatalogSnapshotFromEngine().getFileMetadataList();
+            return localFiles.stream().allMatch(this::skipUpload);
         } catch (Throwable throwable) {
             logger.error("Throwable thrown during isRemoteSegmentStoreInSync", throwable);
         }
@@ -275,10 +275,9 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
                         .map(FileMetadata::file)
                         .collect(Collectors.toList());
 
-                    // Create a map of file name to size and update the refresh segment tracker
-                    Map<String, Long> localSegmentsSizeMap = updateLocalSizeMapAndTracker(localSegmentsPostRefresh).entrySet()
-                        .stream()
-                        .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+                    // Update size map using format-aware FileMetadata
+                    Map<FileMetadata, Long> fileMetadataToSizeMap = updateLocalSizeMapAndTracker(fileMetadataCollection);
+
                     CountDownLatch latch = new CountDownLatch(1);
                     ActionListener<Void> segmentUploadsCompletedListener = new LatchedActionListener<>(new ActionListener<>() {
                         @Override
@@ -288,13 +287,13 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
                                 // Start metadata file upload
                                 uploadMetadata(localSegmentsPostRefresh, segmentInfos, checkpoint);
                                 logger.debug("Metadata upload successful");
-                                clearStaleFilesFromLocalSegmentChecksumMap(localSegmentsPostRefresh);
+                                clearStaleFilesFromLocalSegmentChecksumMap(fileMetadataCollection);
                                 onSuccessfulSegmentsSync(
                                     refreshTimeMs,
                                     refreshClockTimeMs,
                                     refreshSeqNo,
                                     lastRefreshedCheckpoint,
-                                    localSegmentsSizeMap,
+                                    fileMetadataToSizeMap,
                                     checkpoint
                                 );
                                 // At this point since we have uploaded new segments, segment infos and segment metadata file,
@@ -315,7 +314,7 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
                     }, latch);
 
                     // Start the segments files upload using FileMetadata
-                    uploadNewSegments(fileMetadataCollection, localSegmentsSizeMap, segmentUploadsCompletedListener);
+                    uploadNewSegments(fileMetadataCollection, fileMetadataToSizeMap, segmentUploadsCompletedListener);
                     if (latch.await(
                         remoteStoreSettings.getClusterRemoteSegmentTransferTimeout().millis(),
                         TimeUnit.MILLISECONDS
@@ -345,12 +344,12 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
      * Uploads new segment files to the remote store.
      *
      * @param fileMetadataCollection collection of FileMetadata objects containing format and file information
-     * @param localSegmentsSizeMap map of segment file names to their sizes
+     * @param localFileMetadataSizeMap map of segment file names to their sizes
      * @param segmentUploadsCompletedListener listener to be notified when upload completes
      */
     private void uploadNewSegments(
         Collection<FileMetadata> fileMetadataCollection,
-        Map<String, Long> localSegmentsSizeMap,
+        Map<FileMetadata, Long> localFileMetadataSizeMap,
         ActionListener<Void> segmentUploadsCompletedListener
     ) {
         // Filter FileMetadata objects based on whether their files should be uploaded
@@ -368,7 +367,7 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
         Map<String, Long> skippedFormatCounts = fileMetadataCollection.stream()
             .filter(fileMetadata -> skipUpload(fileMetadata))
             .collect(Collectors.groupingBy(
-                fm -> fm.directory(),
+                fm -> fm.dataFormat(),
                 Collectors.counting()
             ));
 
@@ -378,14 +377,14 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
                     fileMetadataCollection.size() - filteredFileMetadata.size(),
                     uploadFormatCounts, skippedFormatCounts);
 
-        Function<Map<String, Long>, UploadListener> uploadListenerFunction = (Map<String, Long> sizeMap) -> createUploadListener(
-            localSegmentsSizeMap
+        Function<Map<FileMetadata, Long>, UploadListener> uploadListenerFunction = (Map<FileMetadata, Long> sizeMap) -> createUploadListener(
+            localFileMetadataSizeMap
         );
 
         // Pass FileMetadata collection to RemoteStoreUploaderService
         remoteStoreUploader.uploadSegments(
             filteredFileMetadata,
-            localSegmentsSizeMap,
+            localFileMetadataSizeMap,
             segmentUploadsCompletedListener,
             uploadListenerFunction,
             isLowPriorityUpload()
@@ -395,14 +394,11 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
     /**
      * Clears the stale files from the latest local segment checksum map.
      *
-     * @param localSegmentsPostRefresh list of segment files present post refresh
+     * @param localSegmentsPostRefresh collection of FileMetadata for files present post refresh
      */
-    private void clearStaleFilesFromLocalSegmentChecksumMap(Collection<String> localSegmentsPostRefresh) {
-        localSegmentChecksumMap.keySet()
-            .stream()
-            .filter(file -> !localSegmentsPostRefresh.contains(file))
-            .collect(Collectors.toSet())
-            .forEach(localSegmentChecksumMap::remove);
+    private void clearStaleFilesFromLocalSegmentChecksumMap(Collection<FileMetadata> localSegmentsPostRefresh) {
+        Set<FileMetadata> currentFiles = new HashSet<>(localSegmentsPostRefresh);
+        localSegmentChecksumMap.keySet().removeIf(key -> !currentFiles.contains(key));
     }
 
     private void beforeSegmentsSync() {
@@ -415,7 +411,7 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
         long refreshClockTimeMs,
         long refreshSeqNo,
         long lastRefreshedCheckpoint,
-        Map<String, Long> localFileSizeMap,
+        Map<FileMetadata, Long> localFileSizeMap,
         ReplicationCheckpoint checkpoint
     ) {
         // Update latest uploaded segment files name in segment tracker
@@ -510,38 +506,28 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
             return EXCLUDE_FILES.contains(fileMetadata.file()) || remoteDirectory.containsFile(fileMetadata, getChecksumOfLocalFile(fileMetadata));
         } catch (IOException e) {
             logger.error(
-                "Exception while reading checksum of local segment file: {}, ignoring the exception and re-uploading the file",
-                fileMetadata.file()
+                "Exception while reading checksum of local segment file: {}, format: {}, ignoring the exception and re-uploading the file",
+                fileMetadata.file(), fileMetadata.dataFormat()
             );
         }
         return false;
     }
-
-    private boolean skipUpload(FileMetadata fileMetadata) {
-        try {
-            // Exclude files that are already uploaded and the exclude files to come up with the list of files to be uploaded.
-            return EXCLUDE_FILES.contains(fileMetadata.directory()) || remoteDirectory.containsFile(fileMetadata.directory(), getChecksumOfLocalFile(fileMetadata));
-        } catch (IOException e) {
-            logger.error(
-                "Exception while reading checksum of local segment file: {}, ignoring the exception and re-uploading the file",
-                fileMetadata.file()
-            );
-        }
-        return false;
-    }
-
 
     private String getChecksumOfLocalFile(FileMetadata fileMetadata) throws IOException {
-        if (!localSegmentChecksumMap.containsKey(fileMetadata.file())) {
+        if (!localSegmentChecksumMap.containsKey(fileMetadata)) {
             try{
                 String checksum = Long.toString(compositeStoreDirectory.calculateChecksum(fileMetadata));
-                localSegmentChecksumMap.put(fileMetadata.file(), checksum);
+                localSegmentChecksumMap.put(fileMetadata, checksum);
+                logger.debug("Calculated checksum for file: {}, format: {}, checksum: {}",
+                            fileMetadata.file(), fileMetadata.dataFormat(), checksum);
             }
             catch (IOException e){
-                logger.info("Exception ", e);
+                logger.error("Failed to calculate checksum for file: {}, format: {}",
+                           fileMetadata.file(), fileMetadata.dataFormat(), e);
+                throw e;
             }
         }
-        return localSegmentChecksumMap.get(fileMetadata.file());
+        return localSegmentChecksumMap.get(fileMetadata);
     }
 
     /**
@@ -554,14 +540,30 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
     }
 
     /**
-     * Updates map of file name to size of the input segment files in the segment tracker. Uses {@code storeDirectory.fileLength(file)} to get the size.
+     * Updates map of FileMetadata to size of the input segment files in the segment tracker.
+     * Uses CompositeStoreDirectory.fileLength(FileMetadata) for efficient format-aware file size retrieval.
      *
-     * @param segmentFiles list of segment files that are part of the most recent local refresh.
+     * @param fileMetadataCollection collection of FileMetadata for files that are part of the most recent local refresh.
      *
-     * @return updated map of local segment files and filesize
+     * @return updated map of FileMetadata to file size
      */
-    private Map<String, Long> updateLocalSizeMapAndTracker(Collection<String> segmentFiles) {
-        return segmentTracker.updateLatestLocalFileNameLengthMap(segmentFiles, compositeStoreDirectory::fileLength);
+    private Map<FileMetadata, Long> updateLocalSizeMapAndTracker(Collection<FileMetadata> fileMetadataCollection) {
+        Map<FileMetadata, Long> fileSizeMap = new HashMap<>();
+
+        for (FileMetadata fileMetadata : fileMetadataCollection) {
+            try {
+                long fileSize = compositeStoreDirectory.fileLength(fileMetadata);
+                fileSizeMap.put(fileMetadata, fileSize);
+            } catch (IOException e) {
+                logger.warn("Failed to get file length for file: {}, format: {}",
+                           fileMetadata.file(), fileMetadata.dataFormat(), e);
+            }
+        }
+
+        // Update segment tracker with FileMetadata-based map
+        segmentTracker.updateLatestLocalFileNameLengthMap(fileSizeMap);
+
+        return fileSizeMap;
     }
 
     private void updateFinalStatusInSegmentTracker(boolean uploadStatus, long bytesBeforeUpload, long startTimeInNS) {
@@ -640,29 +642,29 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
      *
      * @param fileSizeMap updated map of current snapshot of local segments to their sizes
      */
-    private UploadListener createUploadListener(Map<String, Long> fileSizeMap) {
+    private UploadListener createUploadListener(Map<FileMetadata, Long> fileSizeMap) {
         return new UploadListener() {
             private long uploadStartTime = 0;
 
             @Override
-            public void beforeUpload(String file) {
+            public void beforeUpload(FileMetadata fileMetadata) {
                 // Start tracking the upload bytes started
-                segmentTracker.addUploadBytesStarted(fileSizeMap.get(file));
+                segmentTracker.addUploadBytesStarted(fileSizeMap.get(fileMetadata));
                 uploadStartTime = System.currentTimeMillis();
             }
 
             @Override
-            public void onSuccess(String file) {
+            public void onSuccess(FileMetadata fileMetadata) {
                 // Track upload success
-                segmentTracker.addUploadBytesSucceeded(fileSizeMap.get(file));
-                segmentTracker.addToLatestUploadedFiles(file);
+                segmentTracker.addUploadBytesSucceeded(fileSizeMap.get(fileMetadata));
+                segmentTracker.addToLatestUploadedFiles(fileMetadata);
                 segmentTracker.addUploadTimeInMillis(Math.max(1, System.currentTimeMillis() - uploadStartTime));
             }
 
             @Override
-            public void onFailure(String file) {
+            public void onFailure(FileMetadata fileMetadata) {
                 // Track upload failure
-                segmentTracker.addUploadBytesFailed(fileSizeMap.get(file));
+                segmentTracker.addUploadBytesFailed(fileSizeMap.get(fileMetadata));
                 segmentTracker.addUploadTimeInMillis(Math.max(1, System.currentTimeMillis() - uploadStartTime));
             }
         };

@@ -96,14 +96,14 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
      * Only relevant for remote-store-enabled domains on replica shards
      * to store localSegmentFilename -> remoteSegmentFilename mappings
      */
-    private final Map<String, String> pendingDownloadMergedSegments;
+    private final Map<FileMetadata, String> pendingDownloadMergedSegments;
 
     /**
      * Keeps track of local segment filename to uploaded filename along with other attributes like checksum.
      * This map acts as a cache layer for uploaded segment filenames which helps avoid calling listAll() each time.
      * It is important to initialize this map on creation of RemoteSegmentStoreDirectory and update it on each upload and delete.
      */
-    private Map<String, UploadedSegmentMetadata> segmentsUploadedToRemoteStore;
+    private Map<FileMetadata, UploadedSegmentMetadata> segmentsUploadedToRemoteStore;
 
     private static final VersionedCodecStreamWrapper<RemoteSegmentMetadata> metadataStreamWrapper = new VersionedCodecStreamWrapper<>(
         new RemoteSegmentMetadataHandlerFactory(),
@@ -141,7 +141,7 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
         RemoteStoreLockManager mdLockManager,
         ThreadPool threadPool,
         ShardId shardId,
-        @Nullable Map<String, String> pendingDownloadMergedSegments
+        @Nullable Map<FileMetadata, String> pendingDownloadMergedSegments
     ) throws IOException {
         super(remoteDirectory);
         this.compositeRemoteDirectory = null;
@@ -163,7 +163,7 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
         RemoteStoreLockManager mdLockManager,
         ThreadPool threadPool,
         ShardId shardId,
-        @Nullable Map<String, String> pendingDownloadMergedSegments
+        @Nullable Map<FileMetadata, String> pendingDownloadMergedSegments
     ) throws IOException {
         super(null);
         this.compositeRemoteDirectory = compositeRemoteDirectory;
@@ -323,31 +323,33 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
 
 
     /**
+     * Todo: ultrawarm
      * Opens a stream for reading one block from the existing file - always uses compositeRemoteDirectory
      */
     public IndexInput openBlockInput(String name, long position, long length, IOContext context) throws IOException {
-        String remoteFilename = getExistingRemoteFilename(name);
-        if (remoteFilename != null) {
-            long fileLength = compositeRemoteDirectory.fileLength(name, null);
-            return compositeRemoteDirectory.openBlockInput(remoteFilename, null, position, length, fileLength, context);
-        } else {
-            throw new NoSuchFileException(name);
-        }
+//        String remoteFilename = getExistingRemoteFilename(name);
+//        if (remoteFilename != null) {
+//            long fileLength = compositeRemoteDirectory.fileLength(name, null);
+//            return compositeRemoteDirectory.openBlockInput(remoteFilename, null, position, length, fileLength, context);
+//        } else {
+//            throw new NoSuchFileException(name);
+//        }
+        throw new UnsupportedOperationException();
     }
 
     /**
      * Opens a stream for reading one block from the existing file - always uses compositeRemoteDirectory
      * TODO: needs update, currently it's not integrated
      */
-    public IndexInput openBlockInput(String name, String dfName, long position, long length, IOContext context) throws IOException {
-        String remoteFilename = getExistingRemoteFilename(name);
-        if (remoteFilename != null) {
-            long fileLength = compositeRemoteDirectory.fileLength(name, dfName);
-            return compositeRemoteDirectory.openBlockInput(remoteFilename, dfName, position, length, fileLength, context);
-        } else {
-            throw new NoSuchFileException(name);
-        }
-    }
+//    public IndexInput openBlockInput(String name, String dfName, long position, long length, IOContext context) throws IOException {
+//        String remoteFilename = getExistingRemoteFilename(name);
+//        if (remoteFilename != null) {
+//            long fileLength = compositeRemoteDirectory.fileLength(name, dfName);
+//            return compositeRemoteDirectory.openBlockInput(remoteFilename, dfName, position, length, fileLength, context);
+//        } else {
+//            throw new NoSuchFileException(name);
+//        }
+//    }
 
     /**
      * Copies a file from the source directory to a remote based on multi-stream upload support.
@@ -398,8 +400,8 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
     }
 
     private void postUpload(CompositeStoreDirectory from, FileMetadata fileMetadata, String remoteFilename, String checksum) throws IOException {
-        UploadedSegmentMetadata segmentMetadata = new UploadedSegmentMetadata(fileMetadata.file(), remoteFilename, checksum, from.fileLength(fileMetadata), fileMetadata.directory());
-        segmentsUploadedToRemoteStore.put(fileMetadata.file(), segmentMetadata);
+        UploadedSegmentMetadata segmentMetadata = new UploadedSegmentMetadata(fileMetadata.file(), remoteFilename, checksum, from.fileLength(fileMetadata), fileMetadata.dataFormat());
+        segmentsUploadedToRemoteStore.put(fileMetadata, segmentMetadata);
     }
 
     // ===== Primary FileMetadata-based copyFrom API =====
@@ -426,7 +428,7 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
 
                     UploadedSegmentMetadata metadata = new UploadedSegmentMetadata(
                         fileName, remoteFileName, checksum, fileLength, fileMetadata.dataFormat());
-                    segmentsUploadedToRemoteStore.put(fileName, metadata);
+                    segmentsUploadedToRemoteStore.put(fileMetadata, metadata);
 
                     logger.debug("Cache updated after upload: file={}, format={}, checksum={}, length={}",
                                 fileName, fileMetadata.dataFormat(), checksum, fileLength);
@@ -483,15 +485,15 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
     }
 
     public boolean containsFile(FileMetadata fileMetadata, String checksum) {
-        return segmentsUploadedToRemoteStore.containsKey(localFilename)
-            && segmentsUploadedToRemoteStore.get(localFilename).checksum.equals(checksum);
+        return segmentsUploadedToRemoteStore.containsKey(fileMetadata.file())
+            && segmentsUploadedToRemoteStore.get(fileMetadata.file()).checksum.equals(checksum);
     }
 
-    public String getExistingRemoteFilename(String localFilename) {
-        if (segmentsUploadedToRemoteStore.containsKey(localFilename)) {
-            return segmentsUploadedToRemoteStore.get(localFilename).uploadedFilename;
-        } else if (isMergedSegmentPendingDownload(localFilename)) {
-            return pendingDownloadMergedSegments.get(localFilename);
+    public String getExistingRemoteFilename(FileMetadata localFileMetadata) {
+        if (segmentsUploadedToRemoteStore.containsKey(localFileMetadata)) {
+            return segmentsUploadedToRemoteStore.get(localFileMetadata).uploadedFilename;
+        } else if (isMergedSegmentPendingDownload(localFileMetadata)) {
+            return pendingDownloadMergedSegments.get(localFileMetadata);
         }
         return null;
     }
@@ -504,7 +506,7 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
         return remoteFilename.split(SEGMENT_NAME_UUID_SEPARATOR)[0];
     }
 
-    public Map<String, UploadedSegmentMetadata> getSegmentsUploadedToRemoteStore() {
+    public Map<FileMetadata, UploadedSegmentMetadata> getSegmentsUploadedToRemoteStore() {
         return Collections.unmodifiableMap(this.segmentsUploadedToRemoteStore);
     }
 
@@ -517,7 +519,7 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
                 translogGeneration, metadataUploadCounter.incrementAndGet(),
                 RemoteSegmentMetadata.CURRENT_VERSION, nodeId);
 
-            FileMetadata fileMetadata = new FileMetadata("TempMetadata","", metadataFilename);
+            FileMetadata fileMetadata = new FileMetadata("TempMetadata", metadataFilename);
 
             try {
                 try (IndexOutput indexOutput = storeDirectory.createOutput(fileMetadata, IOContext.DEFAULT)) {
@@ -665,16 +667,16 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
 
     // ===== Replica shard methods =====
 
-    public void markMergedSegmentsPendingDownload(Map<String, String> localToRemoteFilenames) {
-        pendingDownloadMergedSegments.putAll(localToRemoteFilenames);
+    public void markMergedSegmentsPendingDownload(Map<FileMetadata, String> localToRemoteFilesMetadata) {
+        pendingDownloadMergedSegments.putAll(localToRemoteFilesMetadata);
     }
 
     public void unmarkMergedSegmentsPendingDownload(Set<String> localFilenames) {
         localFilenames.forEach(pendingDownloadMergedSegments::remove);
     }
 
-    public boolean isMergedSegmentPendingDownload(String localFilename) {
-        return pendingDownloadMergedSegments.containsKey(localFilename);
+    public boolean isMergedSegmentPendingDownload(FileMetadata fileMetadata) {
+        return pendingDownloadMergedSegments.containsKey(fileMetadata);
     }
 
     // ===== Helper methods =====

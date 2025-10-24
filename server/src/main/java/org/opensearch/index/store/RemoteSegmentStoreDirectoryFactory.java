@@ -109,7 +109,7 @@ public class RemoteSegmentStoreDirectoryFactory implements IndexStorePlugin.Dire
             BlobStoreRepository blobStoreRepository = ((BlobStoreRepository) repository);
             BlobPath repositoryBasePath = blobStoreRepository.basePath();
             String shardIdStr = String.valueOf(shardId.id());
-            Map<String, String> pendingDownloadMergedSegments = new ConcurrentHashMap<>();
+            Map<org.opensearch.index.engine.exec.FileMetadata, String> pendingDownloadMergedSegments = new ConcurrentHashMap<>();
 
             RemoteStorePathStrategy.ShardDataPathInput dataPathInput = RemoteStorePathStrategy.ShardDataPathInput.builder()
                 .basePath(repositoryBasePath)

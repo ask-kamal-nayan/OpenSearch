@@ -74,7 +74,7 @@ public class CompositeRemoteDirectory implements Closeable {
      * Map containing the mapping of segment files that are pending download as part of the pre-copy (warm) phase of
      * {@link MergedSegmentWarmer}. The key is the local filename and value is the remote filename.
      */
-    final Map<String, String> pendingDownloadMergedSegments;
+    final Map<FileMetadata, String> pendingDownloadMergedSegments;
 
     /**
      * Separator for generating unique remote segment filenames
@@ -99,7 +99,7 @@ public class CompositeRemoteDirectory implements Closeable {
         UnaryOperator<OffsetRangeInputStream> lowPriorityUploadRateLimiter,
         UnaryOperator<InputStream> downloadRateLimiter,
         UnaryOperator<InputStream> lowPriorityDownloadRateLimiter,
-        Map<String, String> pendingDownloadMergedSegments,
+        Map<FileMetadata, String> pendingDownloadMergedSegments,
         Logger logger,
         Any dataFormats
     ) {
@@ -153,7 +153,7 @@ public class CompositeRemoteDirectory implements Closeable {
         throws IOException {
         boolean success = false;
         try (IndexInput is = from.openInput(src, IOContext.READONCE);
-             IndexOutput os = createOutput(dest, src.directory(), context)) {
+             IndexOutput os = createOutput(dest, src.dataFormat(), context)) {
             os.copyBytes(is, is.length());
             success = true;
         } finally {
@@ -177,11 +177,11 @@ public class CompositeRemoteDirectory implements Closeable {
     ) {
         try {
             String fileName = fileMetadata.file();
-            BlobContainer blobContainer = getBlobContainerForFormat(fileMetadata.directory());
+            BlobContainer blobContainer = getBlobContainerForFormat(fileMetadata.dataFormat());
 
             if (blobContainer instanceof AsyncMultiStreamBlobContainer) {
                 logger.debug("Starting format-aware upload: file={}, format={}, container={}",
-                           fileName, fileMetadata.directory(), blobContainer.path());
+                           fileName, fileMetadata.dataFormat(), blobContainer.path());
                 uploadBlob(from, fileMetadata, remoteFileName, context, postUploadRunner, listener, lowPriorityUpload);
                 return true;
             }
@@ -190,7 +190,7 @@ public class CompositeRemoteDirectory implements Closeable {
             return false;
 
         } catch (Exception e) {
-            logger.error("Failed to start format-aware upload: file={}, error={}", fileMetadata.directory(), e.getMessage(), e);
+            logger.error("Failed to start format-aware upload: file={}, error={}", fileMetadata.dataFormat(), e.getMessage(), e);
             listener.onFailure(e);
             return true;  // Return true to indicate we handled it (even though it failed)
         }
@@ -206,7 +206,7 @@ public class CompositeRemoteDirectory implements Closeable {
         boolean lowPriorityUpload
     ) throws Exception {
         assert ioContext != IOContext.READONCE : "Remote upload will fail with IoContext.READONCE";
-        String dataFormat = src.directory();
+        String dataFormat = src.dataFormat();
         long expectedChecksum = calculateChecksumOfChecksum(from, src);
         long contentLength;
         IndexInput indexInput = from.openInput(src, ioContext);
@@ -389,11 +389,6 @@ public class CompositeRemoteDirectory implements Closeable {
             indexInput.close();
             throw e;
         }
-    }
-
-    // Old
-    private long calculateChecksumOfChecksum(CompositeStoreDirectory from, String src) throws IOException {
-        return from.calculateChecksum(src);
     }
 
     private long calculateChecksumOfChecksum(CompositeStoreDirectory from, FileMetadata fileMetadata) throws IOException {

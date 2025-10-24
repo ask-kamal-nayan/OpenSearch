@@ -60,9 +60,9 @@ public class RemoteStoreUploaderService implements RemoteStoreUploader {
     @Override
     public void uploadSegments(
         Collection<FileMetadata> fileMetadataCollection,
-        Map<String, Long> localSegmentsSizeMap,
+        Map<FileMetadata, Long> fileMetadataSizeMap,
         ActionListener<Void> listener,
-        Function<Map<String, Long>, UploadListener> uploadListenerFunction,
+        Function<Map<FileMetadata, Long>, UploadListener> uploadListenerFunction,
         boolean isLowPriorityUpload
     ) {
         if (fileMetadataCollection.isEmpty()) {
@@ -81,7 +81,7 @@ public class RemoteStoreUploaderService implements RemoteStoreUploader {
         Map<String, Long> formatSizes = fileMetadataCollection.stream()
             .collect(Collectors.groupingBy(
                 fm -> fm.dataFormat(),
-                Collectors.summingLong(fm -> localSegmentsSizeMap.getOrDefault(fm.file(), 0L))
+                Collectors.summingLong(fm -> fileMetadataSizeMap.getOrDefault(fm.file(), 0L))
             ));
 
         logger.debug("Format-aware segment upload starting: totalFiles={}, formatCounts={}, formatSizes={}",
@@ -89,25 +89,26 @@ public class RemoteStoreUploaderService implements RemoteStoreUploader {
         ActionListener<Collection<Void>> mappedListener = ActionListener.map(listener, resp -> null);
         GroupedActionListener<Void> batchUploadListener = new GroupedActionListener<>(mappedListener, fileMetadataCollection.size());
 
-        Directory directory = storeDirectory;
+        CompositeStoreDirectory directory = storeDirectory;
 
         for (FileMetadata fileMetadata : fileMetadataCollection) {
             String fileName = fileMetadata.file();
             // Initializing listener here to ensure that the stats increment operations are thread-safe
-            UploadListener statsListener = uploadListenerFunction.apply(localSegmentsSizeMap);
+            UploadListener statsListener = uploadListenerFunction.apply(fileMetadataSizeMap);
             ActionListener<Void> aggregatedListener = ActionListener.wrap(resp -> {
-                statsListener.onSuccess(fileName);
+                statsListener.onSuccess(fileMetadata);
                 batchUploadListener.onResponse(resp);
 
                 // Log format-specific upload success
-                long fileSize = localSegmentsSizeMap.getOrDefault(fileName, 0L);
+                long fileSize = fileMetadataSizeMap.getOrDefault(fileMetadata, 0L);
                 logger.debug("Format-aware upload completed: file={}, format={}, size={} bytes",
                             fileName, fileMetadata.dataFormat(), fileSize);
 
                 // Once uploaded to Remote, local files become eligible for eviction from FileCache
-                if (directory instanceof CompositeDirectory) {
-                    ((CompositeDirectory) directory).afterSyncToRemote(fileName);
-                }
+                // Todo: Update compositeDirectory for ultrawarm support
+//                if (directory instanceof CompositeDirectory) {
+//                    ((CompositeDirectory) directory).afterSyncToRemote(fileName);
+//                }
             }, ex -> {
                 logger.warn(() -> new ParameterizedMessage("Exception: [{}] while uploading segment files", ex), ex);
 
@@ -133,16 +134,16 @@ public class RemoteStoreUploaderService implements RemoteStoreUploader {
                     trackFormatFailure(fileMetadata.dataFormat(), "unexpected_error");
                 }
 
-                statsListener.onFailure(fileName);
+                statsListener.onFailure(fileMetadata);
                 batchUploadListener.onFailure(ex);
             });
-            statsListener.beforeUpload(fileName);
+            statsListener.beforeUpload(fileMetadata);
             // Place where the actual upload is happening - use FileMetadata-based copyFrom
             remoteDirectory.copyFrom(fileMetadata, storeDirectory, IOContext.DEFAULT, aggregatedListener, isLowPriorityUpload);
         }
     }
 
-    /**
+    /** ToDo: remove this as now e need compositeDirectory fileMetdata
      * Legacy method for backward compatibility
      * @deprecated Use {@link #uploadSegments(Collection, Map, ActionListener, Function, boolean)} with FileMetadata instead
      */
@@ -165,29 +166,29 @@ public class RemoteStoreUploaderService implements RemoteStoreUploader {
         ActionListener<Collection<Void>> mappedListener = ActionListener.map(listener, resp -> null);
         GroupedActionListener<Void> batchUploadListener = new GroupedActionListener<>(mappedListener, localSegments.size());
 
-        Directory directory = storeDirectory;
+        CompositeStoreDirectory directory = storeDirectory;
 
         for (String localSegment : localSegments) {
             // Initializing listener here to ensure that the stats increment operations are thread-safe
             UploadListener statsListener = uploadListenerFunction.apply(localSegmentsSizeMap);
             ActionListener<Void> aggregatedListener = ActionListener.wrap(resp -> {
-                statsListener.onSuccess(localSegment);
+               // statsListener.onSuccess(localSegment);
                 batchUploadListener.onResponse(resp);
                 // Once uploaded to Remote, local files become eligible for eviction from FileCache
-                if (directory instanceof CompositeDirectory) {
-                    ((CompositeDirectory) directory).afterSyncToRemote(localSegment);
-                }
+//                if (directory instanceof CompositeDirectory) {
+//                    ((CompositeDirectory) directory).afterSyncToRemote(localSegment);
+//                }
             }, ex -> {
                 logger.warn(() -> new ParameterizedMessage("Exception: [{}] while uploading segment files", ex), ex);
                 if (ex instanceof CorruptIndexException) {
                     indexShard.failShard(ex.getMessage(), ex);
                 }
-                statsListener.onFailure(localSegment);
+               // statsListener.onFailure(localSegment);
                 batchUploadListener.onFailure(ex);
             });
-            statsListener.beforeUpload(localSegment);
+            //statsListener.beforeUpload(localSegment);
             // Place where the actual upload is happening - use legacy string-based copyFrom
-            remoteDirectory.copyFrom(storeDirectory, localSegment, IOContext.DEFAULT, aggregatedListener, isLowPriorityUpload);
+            //remoteDirectory.copyFrom(storeDirectory, localSegment, IOContext.DEFAULT, aggregatedListener, isLowPriorityUpload);
         }
     }
 

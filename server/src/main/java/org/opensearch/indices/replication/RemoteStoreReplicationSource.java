@@ -103,7 +103,7 @@ public class RemoteStoreReplicationSource implements SegmentReplicationSource {
                 .stream()
                 .collect(
                     Collectors.toMap(
-                        e -> e.getKey(),
+                        e -> e.getKey().file(),  // FileMetadata → String filename
                         e -> new StoreFileMetadata(
                             e.getValue().getOriginalFilename(),
                             e.getValue().getLength(),

@@ -25,16 +25,16 @@ public interface RemoteStoreUploader {
      * Upload segments using FileMetadata for format-aware routing
      *
      * @param fileMetadataCollection collection of FileMetadata objects containing format and file information
-     * @param localSegmentsSizeMap map of segment file names to their sizes
+     * @param fileMeatadataSizeMap map of segment file names to their sizes
      * @param listener listener to be notified when upload completes
      * @param uploadListenerFunction function to create upload listeners
      * @param isLowPriorityUpload whether this is a low priority upload
      */
     void uploadSegments(
         Collection<FileMetadata> fileMetadataCollection,
-        Map<String, Long> localSegmentsSizeMap,
+        Map<FileMetadata, Long> fileMeatadataSizeMap,
         ActionListener<Void> listener,
-        Function<Map<String, Long>, UploadListener> uploadListenerFunction,
+        Function<Map<FileMetadata, Long>, UploadListener> uploadListenerFunction,
         boolean isLowPriorityUpload
     );
 

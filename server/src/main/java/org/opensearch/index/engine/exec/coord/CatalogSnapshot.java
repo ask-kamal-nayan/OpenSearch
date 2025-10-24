@@ -55,13 +55,10 @@ public class CatalogSnapshot extends AbstractRefCounted {
         for (Segment segment : segments) {
             // Each segment contains multiple data formats
             segment.dfGroupedSearchableFiles.forEach((dataFormatName, writerFileSet) -> {
-                String directory = writerFileSet.getDirectory();
-
                 // Create FileMetadata for each file in this WriterFileSet
                 for (String fileName : writerFileSet.getFiles()) {
                     FileMetadata fileMetadata = new FileMetadata(
                         dataFormatName,  // String dataFormat
-                        directory,       // String directory
                         fileName        // String file
                     );
                     allFileMetadata.add(fileMetadata);
