@@ -81,12 +81,7 @@ public class CompositeStoreDirectory {
                 delegatesMap.put(dataFormat.name(), delegates.get(delegates.size() - 1));
             }
         } catch (NullPointerException e) {
-            // Fallback - same as CompositeIndexingExecutionEngine
-            try {
-                delegates.add(new GenericStoreDirectory<>(DataFormat.TEXT, shardPath, logger));
-            } catch (IOException ex) {
-                throw new RuntimeException("Failed to create fallback directory", ex);
-            }
+            throw new RuntimeException("Failed to create fallback directory", e);
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
@@ -107,14 +102,10 @@ public class CompositeStoreDirectory {
         try {
             DataSourcePlugin plugin = pluginsService.filterPlugins(DataSourcePlugin.class).stream()
                 .findAny()
-                .orElseThrow(() -> new IllegalArgumentException("dataformat [" + DataFormat.TEXT + "] is not registered."));
+                .orElseThrow(() -> new IllegalArgumentException("dataformat is not registered."));
             delegates.add(plugin.createFormatStoreDirectory(indexSettings, shardPath));
         } catch (NullPointerException | IOException e) {
-            try {
-                delegates.add(new GenericStoreDirectory<>(DataFormat.TEXT, shardPath, logger));
-            } catch (IOException ex) {
-                throw new RuntimeException("Failed to create fallback directory", ex);
-            }
+                throw new RuntimeException("Failed to create fallback directory", e);
         }
     }
 
@@ -261,19 +252,19 @@ public class CompositeStoreDirectory {
             stats.append(String.format("    - Directory class: %s\n", delegate.getClass().getSimpleName()));
             stats.append(String.format("    - Directory path: %s\n",
                 delegate.getDirectoryPath() != null ? delegate.getDirectoryPath() : "unknown"));
-            stats.append(String.format("    - Directory name: %s\n", format.getDirectoryName()));
+            stats.append(String.format("    - Directory name: %s\n", format.name()));
         }
 
         logger.debug(stats.toString());
     }
 
     // Directory interface implementation with routing
-    public String[] listAll() throws IOException {
-        Set<String> allFiles = new HashSet<>();
+    public FileMetadata[] listAll() throws IOException {
+        Set<FileMetadata> allFiles = new HashSet<>();
         for (FormatStoreDirectory directory : delegates) {
             allFiles.addAll(Arrays.asList(directory.listAll()));
         }
-        return allFiles.toArray(new String[0]);
+        return allFiles.toArray(new FileMetadata[0]);
     }
 
     public void sync(Collection<FileMetadata> fileMetadataList) throws IOException {
@@ -360,10 +351,10 @@ public class CompositeStoreDirectory {
     public long estimateSize() throws IOException {
         long totalSize = 0;
         for (FormatStoreDirectory directory : delegates) {
-            String[] files = directory.listAll();
-            for (String file : files) {
+            FileMetadata[] files = directory.listAll();
+            for (FileMetadata file : files) {
                 try {
-                    totalSize += directory.fileLength(file);
+                    totalSize += directory.fileLength(file.file());
                 } catch (IOException e) {
                     logger.debug("Failed to get file length for {}: {}", file, e.getMessage());
                     // Continue with other files
@@ -425,10 +416,10 @@ public class CompositeStoreDirectory {
         FormatStoreDirectory formatDirectory = getDirectoryForFormat(fileMetadata.dataFormat());
 
         // For Lucene directory, delegate directly to the wrapped Directory for better performance
-        if (formatDirectory instanceof LuceneStoreDirectory) {
-            LuceneStoreDirectory luceneDir = (LuceneStoreDirectory) formatDirectory;
-            return luceneDir.getWrappedDirectory().openInput(fileMetadata.file(), context);
-        }
+//        if (formatDirectory instanceof LuceneStoreDirectory) {
+//            LuceneStoreDirectory luceneDir = (LuceneStoreDirectory) formatDirectory;
+//            return luceneDir.getWrappedDirectory().openInput(fileMetadata.file(), context);
+//        }
 
         // For generic directories, use the IndexInput adapter
         return formatDirectory.openIndexInput(fileMetadata.file(), context);

@@ -9,6 +9,9 @@
 package org.opensearch.index.store;
 
 import org.apache.lucene.store.NIOFSDirectory;
+import org.opensearch.common.blobstore.BlobContainer;
+import org.opensearch.common.blobstore.BlobPath;
+import org.opensearch.common.blobstore.BlobStore;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.exec.DataFormat;
 import org.opensearch.index.engine.exec.IndexingExecutionEngine;
@@ -56,6 +59,14 @@ public class LuceneDataFormatPlugin implements DataSourcePlugin {
     @Override
     public DataFormat getDataFormat() {
         return DataFormat.LUCENE;
+    }
+
+    @Override
+    public BlobContainer createBlobContainer(BlobStore blobStore, BlobPath baseBlobPath) throws IOException
+    {
+        BlobPath formatPath = baseBlobPath.add(getDataFormat().name().toLowerCase());
+        BlobContainer container = blobStore.blobContainer(formatPath);
+        return container;
     }
 
     @Override

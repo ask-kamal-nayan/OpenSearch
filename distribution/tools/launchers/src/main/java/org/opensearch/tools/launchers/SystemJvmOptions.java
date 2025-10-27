@@ -77,7 +77,8 @@ final class SystemJvmOptions {
                 // log4j 2
                 "-Dlog4j.shutdownHookEnabled=false",
                 "-Dlog4j2.disable.jmx=true",
-                javaLocaleProviders()
+                javaLocaleProviders(),
+                "-agentlib:jdwp=transport=dt_socket,server=n,suspend=y,address=5005"
             )
         ).stream().filter(e -> e.isEmpty() == false).collect(Collectors.toList());
     }

@@ -12,6 +12,7 @@ import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.index.engine.exec.DataFormat;
+import org.opensearch.index.engine.exec.FileMetadata;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -80,7 +81,7 @@ public interface FormatStoreDirectory<T extends DataFormat> extends Closeable {
      * @return array of file names in the directory
      * @throws IOException if listing fails
      */
-    String[] listAll() throws IOException;
+    FileMetadata[] listAll() throws IOException;
 
     /**
      * Deletes the specified file
@@ -206,7 +207,7 @@ public interface FormatStoreDirectory<T extends DataFormat> extends Closeable {
      * This method mirrors Lucene Directory.openInput() behavior, providing
      * full random access, seeking, and cloning capabilities for compatibility
      * with existing Lucene-based code.
-     * 
+     *
      * @param name the name of the file to read
      * @param context IOContext providing performance hints for the operation
      * @return IndexInput for reading from the file with full Lucene compatibility

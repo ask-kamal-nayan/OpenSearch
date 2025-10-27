@@ -37,9 +37,12 @@ import org.opensearch.index.engine.MergedSegmentWarmer;
 import org.opensearch.index.engine.exec.DataFormat;
 import org.opensearch.index.engine.exec.FileMetadata;
 import org.opensearch.index.engine.exec.coord.Any;
+import org.opensearch.index.engine.exec.text.TextEngine;
 import org.opensearch.index.store.CompositeStoreDirectory;
 import org.opensearch.index.store.RemoteIndexInput;
 import org.opensearch.index.store.RemoteIndexOutput;
+import org.opensearch.plugins.DataSourcePlugin;
+import org.opensearch.plugins.PluginsService;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -101,7 +104,7 @@ public class CompositeRemoteDirectory implements Closeable {
         UnaryOperator<InputStream> lowPriorityDownloadRateLimiter,
         Map<FileMetadata, String> pendingDownloadMergedSegments,
         Logger logger,
-        Any dataFormats
+        PluginsService pluginsService
     ) {
         this.formatBlobContainers = new ConcurrentHashMap<>();
         this.blobStore = blobStore;
@@ -111,19 +114,16 @@ public class CompositeRemoteDirectory implements Closeable {
         this.downloadRateLimiterProvider = new DownloadRateLimiterProvider(downloadRateLimiter, lowPriorityDownloadRateLimiter);
         this.pendingDownloadMergedSegments = pendingDownloadMergedSegments;
         this.logger = logger;
-        this.any = dataFormats;
+        this.any = null;
 
         BlobPath metadataBlobPath = baseBlobPath.add("metadata");
         this.metadataBlobContainer = blobStore.blobContainer(metadataBlobPath);
 
-        // Eagerly create BlobContainers for each format
-        for (DataFormat format : dataFormats.getDataFormats()) {
-            // Create format-specific BlobPath: basePath/formatName/
-            BlobPath formatPath = baseBlobPath.add(format.name().toLowerCase());
-            BlobContainer container = blobStore.blobContainer(formatPath);
-            formatBlobContainers.put(format.name(), container);
-
-            logger.debug("Created BlobContainer for format {} at path: {}", format.name(), formatPath);
+        try {
+            DataSourcePlugin  plugin = pluginsService.filterPlugins(DataSourcePlugin.class).stream().findAny().orElseThrow(() -> new IllegalArgumentException("dataformat [" + DataFormat.TEXT + "] is not registered."));
+            formatBlobContainers.put(plugin.getDataFormat().name(), plugin.createBlobContainer(blobStore, baseBlobPath));
+        } catch (NullPointerException | IOException e) {
+            formatBlobContainers.put("", null);
         }
 
         logger.debug("Created CompositeRemoteDirectory with {} format BlobContainers",

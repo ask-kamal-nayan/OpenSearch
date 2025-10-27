@@ -52,8 +52,7 @@ public class CompositeEngine implements Indexer {
     private final List<CatalogSnapshotAwareRefreshListener> catalogSnapshotAwareRefreshListeners = new ArrayList<>();
     private final Map<org.opensearch.vectorized.execution.search.DataFormat, List<SearchExecEngine<?, ?, ?, ?>>> readEngines = new HashMap<>();
 
-    public CompositeEngine(MapperService mapperService, PluginsService pluginsService, ShardPath shardPath) throws IOException {
-        List<SearchEnginePlugin> searchEnginePlugins = pluginsService.filterPlugins(SearchEnginePlugin.class);
+    public CompositeEngine(MapperService mapperService, PluginsService pluginsService, ShardPath shardPath) throws IOException {List<SearchEnginePlugin> searchEnginePlugins = pluginsService.filterPlugins(SearchEnginePlugin.class);
         // How to bring the Dataformat here? Currently this means only Text and LuceneFormat can be used
         this.engine = new CompositeIndexingExecutionEngine(mapperService, pluginsService, shardPath, 0);
         Path committerPath = Files.createTempDirectory("lucene-committer-index");

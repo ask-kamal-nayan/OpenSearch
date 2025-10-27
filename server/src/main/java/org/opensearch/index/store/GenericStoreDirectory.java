@@ -13,6 +13,7 @@ import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.RandomAccessInput;
 import org.opensearch.index.engine.exec.DataFormat;
+import org.opensearch.index.engine.exec.FileMetadata;
 import org.opensearch.index.shard.ShardPath;
 
 import java.io.EOFException;
@@ -60,7 +61,7 @@ public class GenericStoreDirectory<T extends DataFormat> implements FormatStoreD
     ) throws IOException {
         this.dataFormat = dataFormat;
         this.acceptedExtensions = Set.copyOf(acceptedExtensions);
-        this.directoryPath = shardPath.resolve(dataFormat.getDirectoryName());
+        this.directoryPath = shardPath.resolve(dataFormat.name());
         this.logger = logger;
 
         Files.createDirectories(this.directoryPath);
@@ -69,7 +70,7 @@ public class GenericStoreDirectory<T extends DataFormat> implements FormatStoreD
     public GenericStoreDirectory(T dataFormat, ShardPath shardPath, Logger logger) throws IOException {
         this.dataFormat = dataFormat;
         this.acceptedExtensions = null;
-        this.directoryPath = shardPath.getDataPath().resolve(dataFormat.getDirectoryName());
+        this.directoryPath = shardPath.getDataPath().resolve(dataFormat.name());
         this.logger = logger;
 
         Files.createDirectories(this.directoryPath);
@@ -103,15 +104,15 @@ public class GenericStoreDirectory<T extends DataFormat> implements FormatStoreD
         logger.debug("Cleaning up GenericStoreDirectory for format: {}", dataFormat.name());
     }
 
-    // Implement FormatStoreDirectory interface using core Java APIs
     @Override
-    public String[] listAll() throws IOException {
+    public FileMetadata[] listAll() throws IOException {
         try (DirectoryStream<Path> stream = Files.newDirectoryStream(directoryPath)) {
             return StreamSupport.stream(stream.spliterator(), false)
                 .map(Path::getFileName)
                 .map(Path::toString)
                 .filter(name -> !Files.isDirectory(directoryPath.resolve(name)))
-                .toArray(String[]::new);
+                .map(fileName -> new FileMetadata(this.dataFormat.name(), fileName))  // Create FileMetadata with format + filename
+                .toArray(FileMetadata[]::new);
         } catch (IOException e) {
             throw new MultiFormatStoreException(
                 "Failed to list files in directory",
@@ -591,7 +592,6 @@ public class GenericStoreDirectory<T extends DataFormat> implements FormatStoreD
             this.isClone = isClone;
         }
 
-        // === Core IndexInput Methods (like NIOFSDirectory) ===
 
         @Override
         public byte readByte() throws IOException {

@@ -8,6 +8,9 @@
 
 package org.opensearch.plugins;
 
+import org.opensearch.common.blobstore.BlobContainer;
+import org.opensearch.common.blobstore.BlobPath;
+import org.opensearch.common.blobstore.BlobStore;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.exec.DataFormat;
 import org.opensearch.index.engine.exec.IndexingExecutionEngine;
@@ -31,6 +34,8 @@ public interface DataSourcePlugin {
         IndexSettings indexSettings,
         ShardPath shardPath
     ) throws IOException;
+
+    public BlobContainer createBlobContainer(BlobStore blobStore, BlobPath blobPath) throws IOException;
 
     DataFormat getDataFormat();
 }

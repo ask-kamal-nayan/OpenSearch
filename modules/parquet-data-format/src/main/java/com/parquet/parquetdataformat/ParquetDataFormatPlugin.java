@@ -14,6 +14,8 @@ import com.parquet.parquetdataformat.writer.ParquetWriter;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.common.blobstore.BlobContainer;
+import org.opensearch.common.blobstore.BlobPath;
+import org.opensearch.common.blobstore.BlobStore;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.exec.DataFormat;
 import org.opensearch.index.engine.exec.IndexingExecutionEngine;
@@ -82,6 +84,14 @@ public class ParquetDataFormatPlugin extends Plugin implements DataSourcePlugin 
     @Override
     public DataFormat getDataFormat() {
         return new ParquetDataFormat();
+    }
+
+    @Override
+    public BlobContainer createBlobContainer(BlobStore blobStore, BlobPath baseBlobPath) throws IOException
+    {
+        BlobPath formatPath = baseBlobPath.add(getDataFormat().name().toLowerCase());
+        BlobContainer container = blobStore.blobContainer(formatPath);
+        return container;
     }
 
     @Override

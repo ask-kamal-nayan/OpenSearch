@@ -128,10 +128,10 @@ public interface IndexStorePlugin {
     }
 
     /**
-     * The {@link CompositeStoreDirectoryFactory} mappings for this plugin. When an index is created the composite store directory 
-     * factory type setting will be examined and either use the default or looked up among all the composite store directory 
+     * The {@link CompositeStoreDirectoryFactory} mappings for this plugin. When an index is created the composite store directory
+     * factory type setting will be examined and either use the default or looked up among all the composite store directory
      * factories from {@link IndexStorePlugin} plugins.
-     * 
+     *
      * This factory enables plugin-based format discovery and centralized creation of CompositeStoreDirectory instances
      * with all discovered DataFormat plugins.
      *

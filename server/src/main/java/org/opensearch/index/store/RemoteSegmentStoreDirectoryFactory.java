@@ -125,7 +125,7 @@ public class RemoteSegmentStoreDirectoryFactory implements IndexStorePlugin.Dire
             BlobPath dataPath = pathStrategy.generatePath(dataPathInput);
 
             // Create format discovery for CompositeRemoteDirectory
-            Any dataFormats = createDataFormats();
+            //Any dataFormats = createDataFormats();
 
             // Create CompositeRemoteDirectory with format support
             CompositeRemoteDirectory compositeDataDirectory = new CompositeRemoteDirectory(
@@ -137,7 +137,7 @@ public class RemoteSegmentStoreDirectoryFactory implements IndexStorePlugin.Dire
                 blobStoreRepository::maybeRateLimitLowPriorityDownloadTransfers,
                 pendingDownloadMergedSegments,
                 LogManager.getLogger("index.store.remote.composite." + shardId),
-                dataFormats  // Any parameter as the LAST parameter
+                pluginsService  // Any parameter as the LAST parameter
             );
 
             RemoteStorePathStrategy.ShardDataPathInput mdPathInput = RemoteStorePathStrategy.ShardDataPathInput.builder()
@@ -190,15 +190,15 @@ public class RemoteSegmentStoreDirectoryFactory implements IndexStorePlugin.Dire
                 // For now, use simplified approach with default formats
                 // In production, this would use proper plugin discovery mechanism
                 java.util.List<DataFormat> discoveredFormats = new ArrayList<>();
-                discoveredFormats.add(DataFormat.PARQUET);   // Add Text as fallback
+                discoveredFormats.add(DataFormat.LUCENE);   // Add Text as fallback
                 return new Any(discoveredFormats);
             } catch (Exception e) {
                 // Fallback to default formats if plugin discovery fails
-                return new Any(java.util.List.of(DataFormat.PARQUET));
+                return new Any(java.util.List.of(DataFormat.LUCENE));
             }
         } else {
             // Use default formats when no PluginsService available
-            return new Any(java.util.List.of(DataFormat.PARQUET));
+            return new Any(java.util.List.of(DataFormat.LUCENE));
         }
     }
 

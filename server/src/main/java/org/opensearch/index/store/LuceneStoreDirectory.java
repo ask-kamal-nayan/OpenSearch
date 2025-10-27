@@ -16,6 +16,7 @@ import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
 import org.opensearch.index.engine.exec.DataFormat;
+import org.opensearch.index.engine.exec.FileMetadata;
 
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -79,8 +80,17 @@ public class LuceneStoreDirectory implements FormatStoreDirectory<DataFormat> {
 
     // Implement FormatStoreDirectory methods by delegating to wrappedDirectory
     @Override
-    public String[] listAll() throws IOException {
-        return wrappedDirectory.listAll();
+    public FileMetadata[] listAll() throws IOException {
+        String[] fileNames = wrappedDirectory.listAll();
+        FileMetadata[] fileMetadataArray = new FileMetadata[fileNames.length];
+
+        String dataFormat = getDataFormat().toString(); // "LUCENE"
+
+        for (int i = 0; i < fileNames.length; i++) {
+            fileMetadataArray[i] = new FileMetadata(dataFormat, fileNames[i]);
+        }
+
+        return fileMetadataArray;
     }
 
     @Override

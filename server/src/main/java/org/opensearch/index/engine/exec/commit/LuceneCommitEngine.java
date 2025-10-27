@@ -21,6 +21,7 @@ import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.NIOFSDirectory;
 import org.opensearch.index.engine.exec.DataFormat;
+import org.opensearch.index.engine.exec.RefreshResult;
 import org.opensearch.index.engine.exec.WriterFileSet;
 import org.opensearch.index.engine.exec.coord.CatalogSnapshot;
 
@@ -37,7 +38,6 @@ public class LuceneCommitEngine implements Committer {
         this.indexWriter = new IndexWriter(directory, indexWriterConfig);
     }
 
-    @Override
     public void addLuceneIndexes(CatalogSnapshot catalogSnapshot) {
         Collection<WriterFileSet> luceneFileCollection = catalogSnapshot.getSearchableFiles(DataFormat.LUCENE.name());
         luceneFileCollection.forEach(writerFileSet -> {
@@ -57,7 +57,7 @@ public class LuceneCommitEngine implements Committer {
     public CommitPoint commit(CatalogSnapshot catalogSnapshot) {
 
         if(catalogSnapshot == null) {
-            catalogSnapshot = new CatalogSnapshot(null, 0);
+            catalogSnapshot = new CatalogSnapshot(new RefreshResult(), 0);
         }
 
         addLuceneIndexes(catalogSnapshot);

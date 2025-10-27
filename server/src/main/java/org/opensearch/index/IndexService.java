@@ -763,10 +763,10 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
             } else {
                 directory = directoryFactory.newDirectory(this.indexSettings, path);
             }
-            
+
             // Create CompositeStoreDirectory using factory if available
             CompositeStoreDirectory factoryCreatedCompositeDirectory = createCompositeStoreDirectory(path);
-            
+
             // Create Store with factory-created CompositeStoreDirectory for multi-format support
             store = new Store(
                 shardId,
@@ -1364,12 +1364,12 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         if (compositeStoreDirectoryFactory != null) {
             logger.debug("Using CompositeStoreDirectoryFactory to create directory for shard path: {}", shardPath);
             return compositeStoreDirectoryFactory.newCompositeStoreDirectory(
-                indexSettings, 
-                shardPath, 
+                indexSettings,
+                shardPath,
                 pluginsService
             );
         }
-        
+
         // Fallback - return null to let Store handle internal creation
         logger.debug("No CompositeStoreDirectoryFactory available, Store will handle internal creation for: {}", shardPath);
         return null;
