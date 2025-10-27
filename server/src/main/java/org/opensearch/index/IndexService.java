@@ -261,7 +261,8 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         Function<ShardId, ReplicationStats> segmentReplicationStatsProvider,
         Supplier<Integer> clusterDefaultMaxMergeAtOnceSupplier,
         SearchEnginePlugin searchEnginePlugin,
-        PluginsService pluginsService
+        PluginsService pluginsService,
+        CompositeStoreDirectoryFactory compositeStoreDirectoryFactory
     ) {
         super(indexSettings);
         this.storeFactory = storeFactory;
@@ -330,7 +331,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         this.nodeEnv = nodeEnv;
         this.directoryFactory = directoryFactory;
         this.compositeDirectoryFactory = compositeDirectoryFactory;
-        this.compositeStoreDirectoryFactory = null; // Initialize as null for backward compatibility
+        this.compositeStoreDirectoryFactory = compositeStoreDirectoryFactory;
         this.remoteDirectoryFactory = remoteDirectoryFactory;
         this.recoveryStateFactory = recoveryStateFactory;
         this.engineFactory = Objects.requireNonNull(engineFactory);
@@ -461,7 +462,8 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
             (shardId) -> ReplicationStats.empty(),
             clusterDefaultMaxMergeAtOnce,
             searchEnginePlugin,
-            pluginsService
+            pluginsService,
+            null  // compositeStoreDirectoryFactory - null for backward compatibility
         );
     }
 

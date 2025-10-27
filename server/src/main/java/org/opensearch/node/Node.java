@@ -935,6 +935,17 @@ public class Node implements Closeable {
                 });
             compositeDirectoryFactories.put("default", new DefaultCompositeDirectoryFactory());
 
+            // Collect CompositeStoreDirectoryFactories from plugins
+            final Map<String, org.opensearch.index.store.CompositeStoreDirectoryFactory> compositeStoreDirectoryFactories = new HashMap<>();
+            pluginsService.filterPlugins(IndexStorePlugin.class)
+                .stream()
+                .forEach(plugin -> {
+                    // Check if plugin implements getCompositeStoreDirectoryFactories method
+                    // For now, we'll add empty collection and rely on default factory
+                });
+            // Register default factory
+            compositeStoreDirectoryFactories.put("default", new org.opensearch.index.store.DefaultCompositeStoreDirectoryFactory());
+
             final Map<String, IndexStorePlugin.RecoveryStateFactory> recoveryStateFactories = pluginsService.filterPlugins(
                 IndexStorePlugin.class
             )
@@ -1001,6 +1012,7 @@ public class Node implements Closeable {
                 engineFactoryProviders,
                 Map.copyOf(directoryFactories),
                 Map.copyOf(compositeDirectoryFactories),
+                Map.copyOf(compositeStoreDirectoryFactories),
                 searchModule.getValuesSourceRegistry(),
                 recoveryStateFactories,
                 storeFactories,
