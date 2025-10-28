@@ -121,7 +121,7 @@ public class CompositeRemoteDirectory implements Closeable {
 
         try {
             DataSourcePlugin  plugin = pluginsService.filterPlugins(DataSourcePlugin.class).stream().findAny().orElseThrow(() -> new IllegalArgumentException("dataformat [" + DataFormat.TEXT + "] is not registered."));
-            formatBlobContainers.put(plugin.getDataFormat().name(), plugin.createBlobContainer(blobStore, baseBlobPath));
+             formatBlobContainers.put(plugin.getDataFormat().name(), plugin.createBlobContainer(blobStore, baseBlobPath));
         } catch (NullPointerException | IOException e) {
             formatBlobContainers.put("", null);
         }
@@ -477,6 +477,7 @@ public class CompositeRemoteDirectory implements Closeable {
     }
 
     /**
+     * ToDo: Remove
      * Find the BlobContainer where the specified file exists
      * @param fileName The name of the file to find
      * @param format The data format
@@ -581,11 +582,11 @@ public class CompositeRemoteDirectory implements Closeable {
         }
         try {
             // Try to find existing container if file exists
-            Optional<BlobContainer> existingContainer = findContainerForFile(remoteFileName, df);
+            BlobContainer blobContainer = formatBlobContainers.get(df);
 
-            if (existingContainer.isPresent()) {
+            if (blobContainer!=null) {
                 logger.debug("File {} already exists, using existing container", remoteFileName);
-                return new RemoteIndexOutput(remoteFileName, existingContainer.get());
+                return new RemoteIndexOutput(remoteFileName, blobContainer);
             }
 
             throw new IOException(

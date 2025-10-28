@@ -824,6 +824,11 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
             );
             eventListener.indexShardStateChanged(indexShard, null, indexShard.state(), "shard created");
             eventListener.afterIndexShardCreated(indexShard);
+            
+            // Complete CompositeEngine initialization after remote store stats trackers have been created
+            // This ensures that RemoteStoreRefreshListener gets a non-null segmentTracker
+            indexShard.completeCompositeEngineInitialization();
+            
             shards = newMapBuilder(shards).put(shardId.id(), indexShard).immutableMap();
             success = true;
             return indexShard;

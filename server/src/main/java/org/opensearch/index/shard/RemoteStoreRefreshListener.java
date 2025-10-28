@@ -85,7 +85,7 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
     private final CompositeStoreDirectory compositeStoreDirectory;
     private final RemoteSegmentStoreDirectory remoteDirectory;
     private final RemoteSegmentTransferTracker segmentTracker;
-    private final Map<FileMetadata, String> localSegmentChecksumMap;
+    private final Map<String, String> localSegmentChecksumMap;
     private volatile long primaryTerm;
     private volatile Iterator<TimeValue> backoffDelayIterator;
     private final SegmentReplicationCheckpointPublisher checkpointPublisher;
@@ -397,13 +397,17 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
      * @param localSegmentsPostRefresh collection of FileMetadata for files present post refresh
      */
     private void clearStaleFilesFromLocalSegmentChecksumMap(Collection<FileMetadata> localSegmentsPostRefresh) {
-        Set<FileMetadata> currentFiles = new HashSet<>(localSegmentsPostRefresh);
-        localSegmentChecksumMap.keySet().removeIf(key -> !currentFiles.contains(key));
+        Set<String> currentFileNames = localSegmentsPostRefresh.stream()
+            .map(FileMetadata::file)
+            .collect(Collectors.toSet());
+        localSegmentChecksumMap.keySet().removeIf(key -> !currentFileNames.contains(key));
     }
 
     private void beforeSegmentsSync() {
-        // Start tracking total uploads started
-        segmentTracker.incrementTotalUploadsStarted();
+        if(segmentTracker != null) {
+            // Start tracking total uploads started
+            segmentTracker.incrementTotalUploadsStarted();
+        }
     }
 
     private void onSuccessfulSegmentsSync(
@@ -514,10 +518,10 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
     }
 
     private String getChecksumOfLocalFile(FileMetadata fileMetadata) throws IOException {
-        if (!localSegmentChecksumMap.containsKey(fileMetadata)) {
+        if (!localSegmentChecksumMap.containsKey(fileMetadata.file())) {
             try{
                 String checksum = Long.toString(compositeStoreDirectory.calculateChecksum(fileMetadata));
-                localSegmentChecksumMap.put(fileMetadata, checksum);
+                localSegmentChecksumMap.put(fileMetadata.file(), checksum);
                 logger.debug("Calculated checksum for file: {}, format: {}, checksum: {}",
                             fileMetadata.file(), fileMetadata.dataFormat(), checksum);
             }
@@ -527,7 +531,7 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
                 throw e;
             }
         }
-        return localSegmentChecksumMap.get(fileMetadata);
+        return localSegmentChecksumMap.get(fileMetadata.file());
     }
 
     /**

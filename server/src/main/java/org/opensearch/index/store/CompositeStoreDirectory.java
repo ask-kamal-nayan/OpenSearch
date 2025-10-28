@@ -72,18 +72,11 @@ public class CompositeStoreDirectory {
         this.directoryFileTransferTracker = new DirectoryFileTransferTracker();
         this.directoryPath = shardPath.getDataPath();
         try {
-            for (DataFormat dataFormat : dataFormats.getDataFormats()) {
-                DataSourcePlugin plugin = pluginsService.filterPlugins(DataSourcePlugin.class).stream()
-                    .filter(curr -> curr.getDataFormat().equals(dataFormat))
-                    .findFirst()
-                    .orElseThrow(() -> new IllegalArgumentException("dataformat [" + dataFormat + "] is not registered."));
-                delegates.add(plugin.createFormatStoreDirectory(indexSettings, shardPath));
-                delegatesMap.put(dataFormat.name(), delegates.get(delegates.size() - 1));
-            }
-        } catch (NullPointerException e) {
-            throw new RuntimeException("Failed to create fallback directory", e);
-        } catch (IOException e) {
-            throw new RuntimeException(e);
+            DataSourcePlugin  plugin = pluginsService.filterPlugins(DataSourcePlugin.class).stream().findAny().orElseThrow(() -> new IllegalArgumentException("dataformat [" + DataFormat.TEXT + "] is not registered."));
+            delegates.add(plugin.createFormatStoreDirectory(indexSettings, shardPath));
+            delegatesMap.put(plugin.getDataFormat().name(), delegates.getLast());
+        } catch (NullPointerException | IOException e) {
+            delegatesMap.put("error", null);
         }
 
         logger.debug("Created CompositeStoreDirectory with {} format directories",
@@ -104,6 +97,7 @@ public class CompositeStoreDirectory {
                 .findAny()
                 .orElseThrow(() -> new IllegalArgumentException("dataformat is not registered."));
             delegates.add(plugin.createFormatStoreDirectory(indexSettings, shardPath));
+            delegatesMap.put(dataFormat.name(), delegates.get(delegates.size() - 1));
         } catch (NullPointerException | IOException e) {
                 throw new RuntimeException("Failed to create fallback directory", e);
         }

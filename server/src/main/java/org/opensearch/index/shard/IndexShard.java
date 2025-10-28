@@ -562,11 +562,28 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                 startRefreshTask();
             }
         }
+
         this.compositeEngine = new CompositeEngine(mapperService, pluginsService, path);
+
     }
 
     public CompositeEngine getIndexingExecutionCoordinator() {
         return compositeEngine;
+    }
+
+    /**
+     * Complete the initialization of CompositeEngine refresh listeners after all dependencies are ready.
+     * This method should be called after remote store stats trackers have been created.
+     */
+    public void completeCompositeEngineInitialization() {
+        try {
+            final EngineConfig engineConfig = newEngineConfig(() -> replicationTracker.getGlobalCheckpoint());
+            compositeEngine.initializeRefreshListeners(engineConfig);
+            logger.debug("Completed CompositeEngine refresh listener initialization for shard [{}]", shardId);
+        } catch (IOException e) {
+            logger.error("Failed to complete CompositeEngine initialization for shard [{}]", shardId, e);
+            throw new RuntimeException("Failed to complete CompositeEngine initialization", e);
+        }
     }
     /**
      * By default, UNASSIGNED_SEQ_NO is used as the initial global checkpoint for new shard initialization. Ingestion

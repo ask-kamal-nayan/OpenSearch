@@ -414,7 +414,8 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
                         IOContext context, ActionListener<Void> listener, boolean lowPriorityUpload) {
 
         String fileName = fileMetadata.file();
-        String remoteFileName = getNewRemoteSegmentFilename(fileName);
+        File file = new File(fileName);
+        String remoteFileName = getNewRemoteSegmentFilename(file.getName());
 
         logger.debug("FileMetadata-based upload initiated: file={}, format={}, remoteFileName={}",
                     fileName, fileMetadata.dataFormat(), remoteFileName);
@@ -446,7 +447,8 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
             if (!uploaded) {
                 logger.warn("Upload not supported by BlobContainer for file={}, format={}",
                            fileName, fileMetadata.dataFormat());
-                listener.onFailure(new IOException("Upload not supported by BlobContainer"));
+                copyFrom(from, fileMetadata, remoteFileName, context);
+                listener.onResponse(null);
             }
         } catch (Exception e) {
             logger.error("FileMetadata-based upload failed: file={}, format={}, error={}",

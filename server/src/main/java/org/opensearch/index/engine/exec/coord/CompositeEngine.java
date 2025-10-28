@@ -10,12 +10,7 @@ package org.opensearch.index.engine.exec.coord;
 
 import org.apache.lucene.search.ReferenceManager;
 import org.opensearch.common.annotation.ExperimentalApi;
-import org.opensearch.index.engine.CatalogSnapshotAwareRefreshListener;
-import org.opensearch.index.engine.Engine;
-import org.opensearch.index.engine.EngineException;
-import org.opensearch.index.engine.SafeCommitInfo;
-import org.opensearch.index.engine.SearchExecEngine;
-import org.opensearch.index.engine.Segment;
+import org.opensearch.index.engine.*;
 import org.opensearch.index.engine.exec.RefreshInput;
 import org.opensearch.index.engine.exec.RefreshResult;
 import org.opensearch.index.engine.exec.WriteResult;
@@ -52,7 +47,8 @@ public class CompositeEngine implements Indexer {
     private final List<CatalogSnapshotAwareRefreshListener> catalogSnapshotAwareRefreshListeners = new ArrayList<>();
     private final Map<org.opensearch.vectorized.execution.search.DataFormat, List<SearchExecEngine<?, ?, ?, ?>>> readEngines = new HashMap<>();
 
-    public CompositeEngine(MapperService mapperService, PluginsService pluginsService, ShardPath shardPath) throws IOException {List<SearchEnginePlugin> searchEnginePlugins = pluginsService.filterPlugins(SearchEnginePlugin.class);
+    public CompositeEngine(MapperService mapperService, PluginsService pluginsService, ShardPath shardPath) throws IOException {
+        List<SearchEnginePlugin> searchEnginePlugins = pluginsService.filterPlugins(SearchEnginePlugin.class);
         // How to bring the Dataformat here? Currently this means only Text and LuceneFormat can be used
         this.engine = new CompositeIndexingExecutionEngine(mapperService, pluginsService, shardPath, 0);
         Path committerPath = Files.createTempDirectory("lucene-committer-index");
@@ -84,6 +80,33 @@ public class CompositeEngine implements Indexer {
                 }
             }
         }
+        // Note: EngineConfig-based refresh listeners will be initialized later via initializeRefreshListeners()
+    }
+    
+    /**
+     * Initialize refresh listeners from EngineConfig after all dependencies are ready.
+     * This method should be called after remote store stats trackers have been created.
+     */
+    public void initializeRefreshListeners(EngineConfig engineConfig) {
+        // Add EngineConfig refresh listeners to catalogSnapshotAwareRefreshListeners
+        if (engineConfig.getInternalRefreshListener() != null) {
+            for (ReferenceManager.RefreshListener listener : engineConfig.getInternalRefreshListener()) {
+                if (listener instanceof CatalogSnapshotAwareRefreshListener) {
+                    catalogSnapshotAwareRefreshListeners.add((CatalogSnapshotAwareRefreshListener) listener);
+                }
+            }
+        }
+
+        // Also check external refresh listeners
+        if (engineConfig.getExternalRefreshListener() != null) {
+            for (ReferenceManager.RefreshListener listener : engineConfig.getExternalRefreshListener()) {
+                if (listener instanceof CatalogSnapshotAwareRefreshListener) {
+                    catalogSnapshotAwareRefreshListeners.add((CatalogSnapshotAwareRefreshListener) listener);
+                }
+            }
+        }
+        
+        System.out.println("CompositeEngine initialized with " + catalogSnapshotAwareRefreshListeners.size() + " catalog snapshot aware refresh listeners");
     }
 
     public SearchExecEngine<?, ?, ?, ?> getReadEngine(org.opensearch.vectorized.execution.search.DataFormat dataFormat) {
