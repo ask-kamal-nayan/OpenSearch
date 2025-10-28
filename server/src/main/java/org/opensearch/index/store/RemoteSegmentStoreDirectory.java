@@ -487,8 +487,8 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
     }
 
     public boolean containsFile(FileMetadata fileMetadata, String checksum) {
-        return segmentsUploadedToRemoteStore.containsKey(fileMetadata.file())
-            && segmentsUploadedToRemoteStore.get(fileMetadata.file()).checksum.equals(checksum);
+        return segmentsUploadedToRemoteStore.containsKey(fileMetadata)
+            && segmentsUploadedToRemoteStore.get(fileMetadata).checksum.equals(checksum);
     }
 
     public String getExistingRemoteFilename(FileMetadata localFileMetadata) {
