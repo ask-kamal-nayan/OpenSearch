@@ -9,13 +9,8 @@
 package org.opensearch.index.shard;
 
 import org.apache.logging.log4j.Logger;
-import org.apache.lucene.codecs.CodecUtil;
-import org.apache.lucene.index.SegmentCommitInfo;
 import org.apache.lucene.index.SegmentInfos;
-import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FilterDirectory;
-import org.apache.lucene.store.IOContext;
-import org.apache.lucene.store.IndexInput;
 import org.opensearch.action.LatchedActionListener;
 import org.opensearch.action.bulk.BackoffPolicy;
 import org.opensearch.cluster.routing.RecoverySource;
@@ -39,7 +34,6 @@ import org.opensearch.indices.replication.checkpoint.ReplicationCheckpoint;
 import org.opensearch.indices.replication.checkpoint.SegmentReplicationCheckpointPublisher;
 import org.opensearch.threadpool.ThreadPool;
 
-import java.io.File;
 import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
@@ -241,8 +235,8 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
                 }
 
                 try (GatedCloseable<SegmentInfos> segmentInfosGatedCloseable = indexShard.getSegmentInfosSnapshot()) {
-                    SegmentInfos segmentInfos = segmentInfosGatedCloseable.get();
-                    final ReplicationCheckpoint checkpoint = indexShard.computeReplicationCheckpoint(segmentInfos);
+                    CatalogSnapshot catalogSnapshot = indexShard.getCatalogSnapshotFromEngine();
+                    final ReplicationCheckpoint checkpoint = indexShard.computeReplicationCheckpoint(catalogSnapshot);
                     if (checkpoint.getPrimaryTerm() != indexShard.getOperationPrimaryTerm()) {
                         throw new IllegalStateException(
                             String.format(
@@ -257,8 +251,7 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
                     // move.
                     long lastRefreshedCheckpoint = ((InternalEngine) indexShard.getEngine()).lastRefreshedCheckpoint();
 
-                    // Use FileMetadata from catalog snapshot instead of extracting segments from SegmentInfos
-                    Collection<FileMetadata> fileMetadataCollection = indexShard.getCatalogSnapshotFromEngine().getFileMetadataList();
+                    Collection<FileMetadata> fileMetadataCollection = getFileMetadatasFromCatalogSnapshot(catalogSnapshot);
 
                     // Log format-aware statistics
                     Map<String, Long> formatCounts = fileMetadataCollection.stream()
@@ -285,7 +278,7 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
                             try {
                                 logger.debug("New segments upload successful");
                                 // Start metadata file upload
-                                uploadMetadata(localSegmentsPostRefresh, segmentInfos, checkpoint);
+                                uploadMetadata(fileMetadataCollection, catalogSnapshot, checkpoint);
                                 logger.debug("Metadata upload successful");
                                 clearStaleFilesFromLocalSegmentChecksumMap(fileMetadataCollection);
                                 onSuccessfulSegmentsSync(
@@ -339,6 +332,7 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
         logger.debug("syncSegments runStatus={}", successful.get());
         return successful.get();
     }
+
 
     /**
      * Uploads new segment files to the remote store.
@@ -469,6 +463,7 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
         return false;
     }
 
+    @Deprecated
     void uploadMetadata(Collection<String> localSegmentsPostRefresh, SegmentInfos segmentInfos, ReplicationCheckpoint replicationCheckpoint)
         throws IOException {
         final long maxSeqNo = ((InternalEngine) indexShard.getEngine()).currentOngoingRefreshCheckpoint();
@@ -486,6 +481,32 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
             remoteDirectory.uploadMetadata(
                 localSegmentsPostRefresh,
                 segmentInfosSnapshot,
+                compositeStoreDirectory,
+                translogFileGeneration,
+                replicationCheckpoint,
+                indexShard.getNodeId()
+            );
+        }
+    }
+
+    // ToDo: Update MaxSeqNo
+    void uploadMetadata(Collection<FileMetadata> fileMetadataCollection, CatalogSnapshot catalogSnapshot, ReplicationCheckpoint replicationCheckpoint)
+        throws IOException {
+        final long maxSeqNo = ((InternalEngine) indexShard.getEngine()).currentOngoingRefreshCheckpoint();
+        CatalogSnapshot catalogSnapshotCopy = catalogSnapshot.clone();
+        Map<String, String> userData = catalogSnapshotCopy.getUserData();
+        userData.put(LOCAL_CHECKPOINT_KEY, String.valueOf(maxSeqNo));
+        userData.put(SequenceNumbers.MAX_SEQ_NO, Long.toString(maxSeqNo));
+        catalogSnapshotCopy.setUserData(userData, false);
+
+        Translog.TranslogGeneration translogGeneration = indexShard.getEngine().translogManager().getTranslogGeneration();
+        if (translogGeneration == null) {
+            throw new UnsupportedOperationException("Encountered null TranslogGeneration while uploading metadata to remote segment store");
+        } else {
+            long translogFileGeneration = translogGeneration.translogFileGeneration;
+            remoteDirectory.uploadMetadata(
+                fileMetadataCollection,
+                catalogSnapshotCopy,
                 compositeStoreDirectory,
                 translogFileGeneration,
                 replicationCheckpoint,
@@ -681,6 +702,30 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
      */
     private boolean shardClosed() {
         return indexShard.state() == IndexShardState.CLOSED;
+    }
+
+    /**
+     * Extracts FileMetadata collection from the provided CatalogSnapshot.
+     * This method provides format-aware file metadata including data format information
+     * for all files present in the catalog snapshot.
+     *
+     * @param catalogSnapshot the catalog snapshot containing file metadata information
+     * @return collection of FileMetadata objects with data format and file name information
+     */
+    private Collection<FileMetadata> getFileMetadatasFromCatalogSnapshot(CatalogSnapshot catalogSnapshot) {
+        if (catalogSnapshot == null) {
+            logger.warn("CatalogSnapshot is null, returning empty FileMetadata collection");
+            return Collections.emptyList();
+        }
+
+        try {
+            Collection<FileMetadata> fileMetadataList = catalogSnapshot.getFileMetadataList();
+            logger.debug("Extracted {} FileMetadata objects from CatalogSnapshot", fileMetadataList.size());
+            return fileMetadataList;
+        } catch (Exception e) {
+            logger.error("Exception while extracting FileMetadata from CatalogSnapshot", e);
+            return Collections.emptyList();
+        }
     }
 
     @Override

@@ -197,7 +197,7 @@ public class CompositeStoreDirectory {
 
         if (directory == null) {
 
-            if(dataFormatName.equalsIgnoreCase("TempMetadata") && delegates.size() > 1)
+            if(dataFormatName.equalsIgnoreCase("TempMetadata") && !delegates.isEmpty())
             {
                 return delegates.getFirst();
             }

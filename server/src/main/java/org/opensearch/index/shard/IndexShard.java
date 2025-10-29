@@ -1957,15 +1957,47 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     }
 
     /**
-     * Compute the latest {@link ReplicationCheckpoint} from a SegmentInfos.
+     * Compute the latest {@link ReplicationCheckpoint} from a CatalogSnapshot.
      * This function fetches a metadata snapshot from the store that comes with an IO cost.
      * We will reuse the existing stored checkpoint if it is at the same SI version.
      *
-     * @param segmentInfos {@link SegmentInfos} infos to use to compute.
-     * @return {@link ReplicationCheckpoint} Checkpoint computed from the infos.
+     * @param catalogSnapshot {@link CatalogSnapshot} snapshot to use to compute.
+     * @return {@link ReplicationCheckpoint} Checkpoint computed from the catalog snapshot.
      * @throws IOException When there is an error computing segment metadata from the store.
      * TODO: SegRep changes for decoupling. looks to depend on codec.
      */
+    ReplicationCheckpoint computeReplicationCheckpoint(CatalogSnapshot catalogSnapshot) throws IOException {
+        if (catalogSnapshot == null) {
+            return ReplicationCheckpoint.empty(shardId);
+        }
+        final ReplicationCheckpoint latestReplicationCheckpoint = getLatestReplicationCheckpoint();
+        if (latestReplicationCheckpoint.getSegmentInfosVersion() == catalogSnapshot.getVersion()
+            && latestReplicationCheckpoint.getSegmentsGen() == catalogSnapshot.getGeneration()
+            && latestReplicationCheckpoint.getPrimaryTerm() == getOperationPrimaryTerm()) {
+            return latestReplicationCheckpoint;
+        }
+        
+        // Use new CatalogSnapshot-based metadata loading instead of segmentInfos
+        final Map<String, StoreFileMetadata> metadataMap = Store.MetadataSnapshot.loadMetadata(
+            catalogSnapshot, 
+            store.compositeStoreDirectory(), 
+            logger,
+            true  // ignore segments file for checkpoint calculation
+        ).fileMetadata;
+        
+        final ReplicationCheckpoint checkpoint = new ReplicationCheckpoint(
+            this.shardId,
+            getOperationPrimaryTerm(),
+            catalogSnapshot.getGeneration(),
+            catalogSnapshot.getVersion(),
+            metadataMap.values().stream().mapToLong(StoreFileMetadata::length).sum(),
+            getEngine().config().getCodec().getName(),
+            metadataMap
+        );
+        logger.trace("Recomputed ReplicationCheckpoint from CatalogSnapshot for shard {}", checkpoint);
+        return checkpoint;
+    }
+
     ReplicationCheckpoint computeReplicationCheckpoint(SegmentInfos segmentInfos) throws IOException {
         if (segmentInfos == null) {
             return ReplicationCheckpoint.empty(shardId);

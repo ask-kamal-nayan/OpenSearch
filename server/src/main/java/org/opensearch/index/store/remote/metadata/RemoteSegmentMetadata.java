@@ -107,17 +107,17 @@ public class RemoteSegmentMetadata {
      * @param segmentMetadata metadata content in the form of {@code Map<String, String>}
      * @return Map with FileMetadata keys
      */
-    public static Map<FileMetadata, RemoteSegmentStoreDirectory.UploadedSegmentMetadata> fromMapOfStrings(Map<String, String> segmentMetadata) {
+    public static Map<FileMetadata, RemoteSegmentStoreDirectory.UploadedSegmentMetadata> fromMapOfStrings(Map<FileMetadata, String> segmentMetadata) {
         return segmentMetadata.entrySet()
             .stream()
             .collect(
                 Collectors.toMap(
                     entry -> {
                         // Parse metadata to get format information
-                        RemoteSegmentStoreDirectory.UploadedSegmentMetadata metadata = 
+                        RemoteSegmentStoreDirectory.UploadedSegmentMetadata metadata =
                             RemoteSegmentStoreDirectory.UploadedSegmentMetadata.fromString(entry.getValue());
                         // Create FileMetadata with format from metadata
-                        return new FileMetadata(metadata.getDataFormat(), entry.getKey());
+                        return new FileMetadata(metadata.getDataFormat(), entry.getKey().file());
                     },
                     entry -> RemoteSegmentStoreDirectory.UploadedSegmentMetadata.fromString(entry.getValue())
                 )
@@ -145,16 +145,17 @@ public class RemoteSegmentMetadata {
      */
     public static RemoteSegmentMetadata read(IndexInput indexInput, int version) throws IOException {
         Map<String, String> metadata = indexInput.readMapOfStrings();
+        // ToDo : update this read once parquet upload flow is complete
         final Map<FileMetadata, RemoteSegmentStoreDirectory.UploadedSegmentMetadata> uploadedSegmentMetadataMap = RemoteSegmentMetadata
-            .fromMapOfStrings(metadata);
-        
+            .fromMapOfStrings(null);
+
         // Create String-based map for readCheckpointFromIndexInput (backward compatibility)
         Map<String, RemoteSegmentStoreDirectory.UploadedSegmentMetadata> stringKeyedMap = uploadedSegmentMetadataMap.entrySet().stream()
             .collect(Collectors.toMap(
                 entry -> entry.getKey().file(),
                 Map.Entry::getValue
             ));
-        
+
         ReplicationCheckpoint replicationCheckpoint = readCheckpointFromIndexInput(indexInput, stringKeyedMap, version);
         int byteArraySize = (int) indexInput.readLong();
         byte[] segmentInfosBytes = new byte[byteArraySize];

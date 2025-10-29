@@ -84,7 +84,8 @@ public class VersionedCodecStreamWrapper<T> {
     public void writeStream(IndexOutput indexOutput, T content) throws IOException {
         this.writeHeader(indexOutput);
         getHandlerForVersion(this.currentVersion).writeContent(indexOutput, content);
-        this.writeFooter(indexOutput);
+        // ToDo @kamal it's failing
+        // this.writeFooter(indexOutput);
     }
 
     /**

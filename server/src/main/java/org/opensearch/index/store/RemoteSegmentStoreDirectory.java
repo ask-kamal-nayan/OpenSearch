@@ -29,6 +29,7 @@ import org.opensearch.common.lucene.store.ByteArrayIndexInput;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.index.engine.exec.FileMetadata;
+import org.opensearch.index.engine.exec.coord.CatalogSnapshot;
 import org.opensearch.index.remote.RemoteStorePathStrategy;
 import org.opensearch.index.remote.RemoteStoreUtils;
 import org.opensearch.index.store.lockmanager.FileLockInfo;
@@ -512,6 +513,56 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
         return Collections.unmodifiableMap(this.segmentsUploadedToRemoteStore);
     }
 
+    public void uploadMetadata(Collection<FileMetadata> fileMetadataCollection, CatalogSnapshot catalogSnapshot,
+                               CompositeStoreDirectory storeDirectory, long translogGeneration,
+                               ReplicationCheckpoint replicationCheckpoint, String nodeId) throws IOException {
+        synchronized (this) {
+            String metadataFilename = MetadataFilenameUtils.getMetadataFilename(
+                replicationCheckpoint.getPrimaryTerm(), catalogSnapshot.getGeneration(),
+                translogGeneration, metadataUploadCounter.incrementAndGet(),
+                RemoteSegmentMetadata.CURRENT_VERSION, nodeId);
+
+            FileMetadata fileMetadata = new FileMetadata("TempMetadata", metadataFilename);
+
+            try {
+                try (IndexOutput indexOutput = storeDirectory.createOutput(fileMetadata, IOContext.DEFAULT)) {
+                    // TODO: Implement getSegmentToLuceneVersion for CatalogSnapshot when needed
+                    // For now, use empty map as placeholder
+                    Map<String, Integer> segmentToLuceneVersion = new HashMap<>();
+                    Map<FileMetadata, String> uploadedSegments = new HashMap<>();
+
+                    for (FileMetadata file : fileMetadataCollection) {
+                        if (segmentsUploadedToRemoteStore.containsKey(file)) {
+                            UploadedSegmentMetadata metadata = segmentsUploadedToRemoteStore.get(file);
+                            if (segmentToLuceneVersion.get(metadata.originalFilename) == null) {
+                                // Todo
+                                 // metadata.setWrittenByMajor(10);
+                            } else {
+                                metadata.setWrittenByMajor(segmentToLuceneVersion.get(metadata.originalFilename));
+                            }
+                            uploadedSegments.put(file, metadata.toString());
+                        } else {
+                            throw new NoSuchFileException(file.file());
+                        }
+                    }
+
+                    // TODO: Implement proper CatalogSnapshot serialization when needed
+                    // For now, create empty byte array as placeholder
+                    byte[] catalogSnapshotByteArray = new byte[0];
+
+                    metadataStreamWrapper.writeStream(indexOutput, new RemoteSegmentMetadata(
+                        RemoteSegmentMetadata.fromMapOfStrings(uploadedSegments),
+                        catalogSnapshotByteArray, replicationCheckpoint));
+                }
+
+                storeDirectory.sync(Collections.singleton(fileMetadata));
+                compositeRemoteDirectory.copyFrom(storeDirectory, fileMetadata, metadataFilename, IOContext.DEFAULT);
+            } finally {
+                tryAndDeleteLocalFile(fileMetadata, storeDirectory);
+            }
+        }
+    }
+
     public void uploadMetadata(Collection<String> segmentFiles, SegmentInfos segmentInfosSnapshot,
                                CompositeStoreDirectory storeDirectory, long translogGeneration,
                                ReplicationCheckpoint replicationCheckpoint, String nodeId) throws IOException {
@@ -529,7 +580,7 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
                     Map<String, String> uploadedSegments = new HashMap<>();
 
                     for (String file : segmentFiles) {
-                        if (segmentsUploadedToRemoteStore.containsKey(file)) {
+                        if (segmentsUploadedToRemoteStore.containsKey(fileMetadata)) {
                             UploadedSegmentMetadata metadata = segmentsUploadedToRemoteStore.get(file);
                             if (segmentToLuceneVersion.get(metadata.originalFilename) == null) {
                                 metadata.setWrittenByMajor(0);
@@ -546,9 +597,9 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
                     segmentInfosSnapshot.write(new ByteBuffersIndexOutput(byteBuffersIndexOutput, "Snapshot of SegmentInfos", "SegmentInfos"));
                     byte[] segmentInfoSnapshotByteArray = byteBuffersIndexOutput.toArrayCopy();
 
-                    metadataStreamWrapper.writeStream(indexOutput, new RemoteSegmentMetadata(
-                        RemoteSegmentMetadata.fromMapOfStrings(uploadedSegments),
-                        segmentInfoSnapshotByteArray, replicationCheckpoint));
+//                    metadataStreamWrapper.writeStream(indexOutput, new RemoteSegmentMetadata(
+//                        RemoteSegmentMetadata.fromMapOfStrings(uploadedSegments),
+//                        segmentInfoSnapshotByteArray, replicationCheckpoint));
                 }
 
                 storeDirectory.sync(Collections.singleton(fileMetadata));
@@ -683,6 +734,7 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
 
     // ===== Helper methods =====
 
+
     private Map<String, Integer> getSegmentToLuceneVersion(Collection<String> segmentFiles, SegmentInfos segmentInfosSnapshot) {
         Map<String, Integer> segmentToLuceneVersion = new HashMap<>();
         for (SegmentCommitInfo segmentCommitInfo : segmentInfosSnapshot) {
@@ -756,7 +808,9 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
         }
 
         public static UploadedSegmentMetadata fromString(String uploadedFilename) {
-            String[] values = uploadedFilename.split(SEPARATOR);
+            File file = new File(uploadedFilename);
+            var filename = file.getName();
+            String[] values = filename.split(SEPARATOR);
 
             // Extract dataFormat from position 5, default to "lucene" for backward compatibility
             String dataFormat = values.length >= 6 ? values[5] : "lucene";
@@ -772,7 +826,8 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
 
             // Set writtenByMajor if present
             if (values.length >= 5) {
-                metadata.setWrittenByMajor(Integer.parseInt(values[4]));
+                // ToDo: kamal
+                // metadata.setWrittenByMajor(Integer.parseInt(values[4]));
             }
 
             return metadata;

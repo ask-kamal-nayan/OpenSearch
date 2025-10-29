@@ -588,6 +588,9 @@ public class CompositeRemoteDirectory implements Closeable {
                 logger.debug("File {} already exists, using existing container", remoteFileName);
                 return new RemoteIndexOutput(remoteFileName, blobContainer);
             }
+            else if(df !=null && df.equals("TempMetadata")) {
+                return new RemoteIndexOutput(remoteFileName, metadataBlobContainer);
+            }
 
             throw new IOException(
                 String.format("Failed to create output for file %s in format %s", remoteFileName, df)

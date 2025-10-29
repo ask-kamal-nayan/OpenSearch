@@ -92,7 +92,9 @@ import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.CombinedDeletionPolicy;
 import org.opensearch.index.engine.DataFormatPlugin;
 import org.opensearch.index.engine.Engine;
+import org.opensearch.index.engine.exec.FileMetadata;
 import org.opensearch.index.engine.exec.coord.Any;
+import org.opensearch.index.engine.exec.coord.CatalogSnapshot;
 import org.opensearch.index.seqno.SequenceNumbers;
 import org.opensearch.index.shard.AbstractIndexShardComponent;
 import org.opensearch.index.shard.IndexShard;
@@ -111,6 +113,7 @@ import java.io.UncheckedIOException;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -1245,6 +1248,133 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
                 checksumFromLuceneFile(directory, segmentsFile, builder, logger, maxVersion, true);
             }
             return new LoadedMetadata(unmodifiableMap(builder), unmodifiableMap(commitUserDataBuilder), numDocs);
+        }
+
+        /**
+         * Creates LoadedMetadata from CatalogSnapshot using CompositeStoreDirectory APIs.
+         * This method enables format-aware metadata calculation for replication checkpoints.
+         */
+        public static LoadedMetadata loadMetadata(CatalogSnapshot catalogSnapshot,
+                                                CompositeStoreDirectory compositeDirectory,
+                                                Logger logger) throws IOException {
+            return loadMetadata(catalogSnapshot, compositeDirectory, logger, false);
+        }
+
+        /**
+         * Creates LoadedMetadata from CatalogSnapshot using CompositeStoreDirectory APIs.
+         * This method enables format-aware metadata calculation for replication checkpoints.
+         *
+         * @param catalogSnapshot the CatalogSnapshot containing file information
+         * @param compositeDirectory the CompositeStoreDirectory for format-aware operations
+         * @param logger logger for debugging and error reporting
+         * @param ignoreSegmentsFile whether to skip segments files in metadata calculation
+         * @return LoadedMetadata containing file metadata, user data, and document count
+         */
+        public static LoadedMetadata loadMetadata(CatalogSnapshot catalogSnapshot,
+                                                  CompositeStoreDirectory compositeDirectory,
+                                                  Logger logger,
+                                                  boolean ignoreSegmentsFile) throws IOException {
+
+            // TODO: Extract actual document count from CatalogSnapshot when API is available
+            long numDocs = 0; // Placeholder
+
+            // TODO: Extract commit user data from CatalogSnapshot when API is available
+            Map<String, String> commitUserData = new HashMap<>(); // Placeholder
+
+            Map<String, StoreFileMetadata> builder = new HashMap<>();
+            Version maxVersion = null;
+
+            // Get all files from CatalogSnapshot
+            Collection<FileMetadata> fileMetadatas = catalogSnapshot.getFileMetadataList();
+
+            for (FileMetadata fileMetadata : fileMetadatas) {
+                String fileName = fileMetadata.file();
+
+                // Skip segments files if requested
+                if (ignoreSegmentsFile && fileName.startsWith(IndexFileNames.SEGMENTS)) {
+                    continue;
+                }
+
+                try {
+                    // Use CompositeStoreDirectory APIs for efficient metadata calculation
+                    long length = compositeDirectory.fileLength(fileMetadata);
+
+                    // Convert checksum from long to string format expected by StoreFileMetadata
+                    long checksumLong = compositeDirectory.calculateChecksum(fileMetadata);
+                    String checksum = Store.digestToString(checksumLong);
+
+                    // TODO: Implement version extraction from segment info files
+                    // For now, use a reasonable default version
+                    Version version = org.opensearch.Version.CURRENT.minimumIndexCompatibilityVersion().luceneVersion;
+
+                    // Create hash for small files only
+                    BytesRef hash = createHashForSmallFiles(compositeDirectory, fileMetadata, length, logger);
+
+                    StoreFileMetadata storeFileMetadata = new StoreFileMetadata(fileName, length, checksum, version, hash);
+                    builder.put(fileName, storeFileMetadata);
+
+                    // Track max version
+                    if (maxVersion == null || version.onOrAfter(maxVersion)) {
+                        maxVersion = version;
+                    }
+
+                } catch (IOException e) {
+                    logger.warn("Failed to create metadata for file: {} with format: {}", fileName, fileMetadata.dataFormat(), e);
+                    // Continue with other files
+                }
+            }
+
+            if (maxVersion == null) {
+                maxVersion = org.opensearch.Version.CURRENT.minimumIndexCompatibilityVersion().luceneVersion;
+            }
+
+            return new LoadedMetadata(unmodifiableMap(builder), unmodifiableMap(commitUserData), numDocs);
+        }
+
+        /**
+         * Creates hash for small files using CompositeStoreDirectory APIs
+         */
+        private static BytesRef createHashForSmallFiles(CompositeStoreDirectory compositeDirectory,
+                                                      org.opensearch.index.engine.exec.FileMetadata fileMetadata,
+                                                      long length, Logger logger) throws IOException {
+            // Only hash small files to avoid memory issues
+            if (length > 1024 * 1024) { // 1MB limit
+                return new BytesRef();
+            }
+
+            BytesRefBuilder fileHash = new BytesRefBuilder();
+            try (IndexInput input = compositeDirectory.openInput(fileMetadata, IOContext.READONCE)) {
+                // Create a simple adapter to convert IndexInput to InputStream for hashing
+                InputStream inputStream = new InputStream() {
+                    @Override
+                    public int read() throws IOException {
+                        if (input.getFilePointer() >= input.length()) {
+                            return -1;
+                        }
+                        return input.readByte() & 0xFF;
+                    }
+
+                    @Override
+                    public int read(byte[] b, int off, int len) throws IOException {
+                        if (input.getFilePointer() >= input.length()) {
+                            return -1;
+                        }
+                        long remaining = input.length() - input.getFilePointer();
+                        int toRead = (int) Math.min(len, remaining);
+                        if (toRead <= 0) {
+                            return -1;
+                        }
+                        input.readBytes(b, off, toRead);
+                        return toRead;
+                    }
+                };
+
+                Store.MetadataSnapshot.hashFile(fileHash, inputStream, length);
+                return fileHash.get();
+            } catch (Exception e) {
+                logger.debug("Failed to create hash for file: {}", fileMetadata.file(), e);
+                return new BytesRef(); // Return empty hash on failure
+            }
         }
 
         private static void checksumFromLuceneFile(
