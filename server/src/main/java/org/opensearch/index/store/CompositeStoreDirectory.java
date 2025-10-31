@@ -97,7 +97,7 @@ public class CompositeStoreDirectory {
                 .findAny()
                 .orElseThrow(() -> new IllegalArgumentException("dataformat is not registered."));
             delegates.add(plugin.createFormatStoreDirectory(indexSettings, shardPath));
-            delegatesMap.put(dataFormat.name(), delegates.get(delegates.size() - 1));
+            delegatesMap.put(plugin.getDataFormat().name(), delegates.get(delegates.size() - 1));
         } catch (NullPointerException | IOException e) {
                 throw new RuntimeException("Failed to create fallback directory", e);
         }

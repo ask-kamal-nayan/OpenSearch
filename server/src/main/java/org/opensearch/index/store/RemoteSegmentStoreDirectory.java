@@ -43,6 +43,7 @@ import org.opensearch.indices.replication.checkpoint.ReplicationCheckpoint;
 import org.opensearch.node.remotestore.RemoteStorePinnedTimestampService;
 import org.opensearch.threadpool.ThreadPool;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -546,9 +547,11 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
                         }
                     }
 
-                    // TODO: Implement proper CatalogSnapshot serialization when needed
-                    // For now, create empty byte array as placeholder
-                    byte[] catalogSnapshotByteArray = new byte[0];
+                    // Serialize CatalogSnapshot using standard Java APIs
+                    // ToDo: We need to update this with some opensource library which can optimize space
+                    ByteArrayOutputStream catalogOutputStream = new ByteArrayOutputStream();
+                    catalogSnapshot.writeTo(catalogOutputStream);
+                    byte[] catalogSnapshotByteArray = catalogOutputStream.toByteArray();
 
                     metadataStreamWrapper.writeStream(indexOutput, new RemoteSegmentMetadata(
                         RemoteSegmentMetadata.fromMapOfStrings(uploadedSegments),
@@ -630,6 +633,10 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
         // ... stale segment deletion logic using compositeRemoteDirectory.deleteFile() directly
 
         logger.debug("deletedSegmentFiles={}", deletedSegmentFiles);
+    }
+
+    public void deleteStaleSegmentsAsync(int lastNMetadataFilesToKeep) {
+        deleteStaleSegmentsAsync(lastNMetadataFilesToKeep, ActionListener.wrap(r -> {}, e -> {}));
     }
 
     public void deleteStaleSegmentsAsync(int lastNMetadataFilesToKeep, ActionListener<Void> listener) {

@@ -59,7 +59,6 @@ public class LuceneCommitEngine implements Committer {
         if(catalogSnapshot == null) {
             catalogSnapshot = new CatalogSnapshot(new RefreshResult(), 0);
         }
-
         addLuceneIndexes(catalogSnapshot);
         try {
             indexWriter.commit();

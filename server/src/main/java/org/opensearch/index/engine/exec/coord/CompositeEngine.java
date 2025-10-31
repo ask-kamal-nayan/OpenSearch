@@ -82,7 +82,7 @@ public class CompositeEngine implements Indexer {
         }
         // Note: EngineConfig-based refresh listeners will be initialized later via initializeRefreshListeners()
     }
-    
+
     /**
      * Initialize refresh listeners from EngineConfig after all dependencies are ready.
      * This method should be called after remote store stats trackers have been created.
@@ -105,7 +105,7 @@ public class CompositeEngine implements Indexer {
                 }
             }
         }
-        
+
         System.out.println("CompositeEngine initialized with " + catalogSnapshotAwareRefreshListeners.size() + " catalog snapshot aware refresh listeners");
     }
 
@@ -296,6 +296,10 @@ public class CompositeEngine implements Indexer {
 
     @Override
     public void flush(boolean force, boolean waitIfOngoing) throws EngineException {
+        // Increment version before commit (similar to SegmentInfos pattern - matches Lucene behavior)
+        if (catalogSnapshot != null) {
+            catalogSnapshot.changed();
+        }
         compositeEngineCommitter.commit(catalogSnapshot);
     }
 

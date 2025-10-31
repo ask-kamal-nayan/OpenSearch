@@ -1976,15 +1976,15 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             && latestReplicationCheckpoint.getPrimaryTerm() == getOperationPrimaryTerm()) {
             return latestReplicationCheckpoint;
         }
-        
+
         // Use new CatalogSnapshot-based metadata loading instead of segmentInfos
         final Map<String, StoreFileMetadata> metadataMap = Store.MetadataSnapshot.loadMetadata(
-            catalogSnapshot, 
-            store.compositeStoreDirectory(), 
+            catalogSnapshot,
+            store.compositeStoreDirectory(),
             logger,
             true  // ignore segments file for checkpoint calculation
         ).fileMetadata;
-        
+
         final ReplicationCheckpoint checkpoint = new ReplicationCheckpoint(
             this.shardId,
             getOperationPrimaryTerm(),
