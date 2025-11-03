@@ -20,6 +20,7 @@ import org.opensearch.index.store.StoreFileMetadata;
 import org.opensearch.indices.replication.checkpoint.ReplicationCheckpoint;
 
 import java.io.IOException;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -104,7 +105,7 @@ public class RemoteSegmentMetadata {
     /**
      * Generate {@link RemoteSegmentMetadata} from {@code segmentMetadata}
      * Converts String-based serialized metadata to FileMetadata-keyed map.
-     * @param segmentMetadata metadata content in the form of {@code Map<String, String>}
+     * @param segmentMetadata metadata content in the form of {@code Map<FileMetadata, String>}
      * @return Map with FileMetadata keys
      */
     public static Map<FileMetadata, RemoteSegmentStoreDirectory.UploadedSegmentMetadata> fromMapOfStrings(Map<FileMetadata, String> segmentMetadata) {
@@ -144,10 +145,50 @@ public class RemoteSegmentMetadata {
      * @throws IOException in case there is a problem reading from the file input stream
      */
     public static RemoteSegmentMetadata read(IndexInput indexInput, int version) throws IOException {
-        Map<String, String> metadata = indexInput.readMapOfStrings();
-        // ToDo : update this read once parquet upload flow is complete
-        final Map<FileMetadata, RemoteSegmentStoreDirectory.UploadedSegmentMetadata> uploadedSegmentMetadataMap = RemoteSegmentMetadata
-            .fromMapOfStrings(null);
+        Map<String, String> serializedMetadata = indexInput.readMapOfStrings();
+        
+        // Add null check and validation
+        if (serializedMetadata == null) {
+            throw new IOException("Serialized metadata cannot be null during RemoteSegmentMetadata deserialization");
+        }
+        
+        // Convert Map<String, String> to Map<FileMetadata, String> by reconstructing format information
+        Map<FileMetadata, String> fileMetadataMap = new HashMap<>();
+        for (Map.Entry<String, String> entry : serializedMetadata.entrySet()) {
+            String filename = entry.getKey();
+            String metadataString = entry.getValue();
+            
+            if (filename == null || metadataString == null) {
+                throw new IOException("Invalid metadata entry: filename=" + filename + ", metadataString=" + metadataString);
+            }
+            
+            try {
+                // Parse format from UploadedSegmentMetadata string (format is preserved in toString())
+                RemoteSegmentStoreDirectory.UploadedSegmentMetadata parsedMetadata = 
+                    RemoteSegmentStoreDirectory.UploadedSegmentMetadata.fromString(metadataString);
+                
+                // Reconstruct FileMetadata with correct format
+                FileMetadata fileMetadata = new FileMetadata(parsedMetadata.getDataFormat(), filename);
+                fileMetadataMap.put(fileMetadata, metadataString);
+            } catch (Exception e) {
+                throw new IOException("Failed to parse UploadedSegmentMetadata for file: " + filename, e);
+            }
+        }
+        
+        // Add null check before calling fromMapOfStrings
+        if (fileMetadataMap.isEmpty()) {
+            // Handle empty metadata case gracefully
+            final Map<FileMetadata, RemoteSegmentStoreDirectory.UploadedSegmentMetadata> emptyMap = new HashMap<>();
+            ReplicationCheckpoint replicationCheckpoint = readCheckpointFromIndexInput(indexInput, new HashMap<>(), version);
+            int byteArraySize = (int) indexInput.readLong();
+            byte[] segmentInfosBytes = new byte[byteArraySize];
+            indexInput.readBytes(segmentInfosBytes, 0, byteArraySize);
+            return new RemoteSegmentMetadata(emptyMap, segmentInfosBytes, replicationCheckpoint);
+        }
+        
+        // Now pass the properly converted map instead of null
+        final Map<FileMetadata, RemoteSegmentStoreDirectory.UploadedSegmentMetadata> uploadedSegmentMetadataMap = 
+            RemoteSegmentMetadata.fromMapOfStrings(fileMetadataMap);
 
         // Create String-based map for readCheckpointFromIndexInput (backward compatibility)
         Map<String, RemoteSegmentStoreDirectory.UploadedSegmentMetadata> stringKeyedMap = uploadedSegmentMetadataMap.entrySet().stream()

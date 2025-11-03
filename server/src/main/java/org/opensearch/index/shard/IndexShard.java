@@ -1957,6 +1957,44 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     }
 
     /**
+     * Compute and return the latest ReplicationCheckpoint for a shard and a GatedCloseable containing the corresponding CatalogSnapshot.
+     * This method uses CatalogSnapshot instead of SegmentInfos to ensure consistent checkpoint version calculation
+     * across all replication checkpoint computation flows.
+     * <p>
+     * Primary shards compute the seqNo used in the replication checkpoint from the fetched CatalogSnapshot.
+     * Replica shards compute the seqNo from its latest processed checkpoint, which only increases when refreshing on new segments.
+     *
+     * @return A {@link Tuple} containing CatalogSnapshot wrapped in a {@link GatedCloseable} and the {@link ReplicationCheckpoint} computed from the catalog.
+     *
+     */
+    public Tuple<GatedCloseable<CatalogSnapshot>, ReplicationCheckpoint> getLatestCatalogSnapshotAndCheckpoint() {
+        assert indexSettings.isSegRepEnabledOrRemoteNode();
+
+        CatalogSnapshot catalogSnapshot = null;
+        try {
+            catalogSnapshot = getCatalogSnapshotFromEngine();
+            final ReplicationCheckpoint checkpoint = computeReplicationCheckpoint(catalogSnapshot);
+            
+            // Create a GatedCloseable wrapper for the catalog snapshot
+            final CatalogSnapshot finalCatalogSnapshot = catalogSnapshot;
+            GatedCloseable<CatalogSnapshot> gatedCatalogSnapshot = new GatedCloseable<>(catalogSnapshot, () -> {
+                if (finalCatalogSnapshot != null) {
+                    finalCatalogSnapshot.decRef();
+                }
+            });
+            
+            logger.trace("Retrieved latest CatalogSnapshot and computed checkpoint: shard={}, checkpoint={}", shardId, checkpoint);
+            return new Tuple<>(gatedCatalogSnapshot, checkpoint);
+        } catch (IOException | AlreadyClosedException e) {
+            logger.error("Error Fetching CatalogSnapshot and latest checkpoint", e);
+            if (catalogSnapshot != null) {
+                catalogSnapshot.decRef();
+            }
+        }
+        return new Tuple<>(new GatedCloseable<>(null, () -> {}), getLatestReplicationCheckpoint());
+    }
+
+    /**
      * Compute the latest {@link ReplicationCheckpoint} from a CatalogSnapshot.
      * This function fetches a metadata snapshot from the store that comes with an IO cost.
      * We will reuse the existing stored checkpoint if it is at the same SI version.
@@ -5234,11 +5272,14 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     }
 
     private void updateReplicationCheckpoint() {
-        final Tuple<GatedCloseable<SegmentInfos>, ReplicationCheckpoint> tuple = getLatestSegmentInfosAndCheckpoint();
-        try (final GatedCloseable<SegmentInfos> ignored = tuple.v1()) {
-            replicationTracker.setLatestReplicationCheckpoint(tuple.v2());
+        try {
+            final CatalogSnapshot catalogSnapshot = getCatalogSnapshotFromEngine();
+            final ReplicationCheckpoint checkpoint = computeReplicationCheckpoint(catalogSnapshot);
+            replicationTracker.setLatestReplicationCheckpoint(checkpoint);
+            logger.trace("Updated replication checkpoint from CatalogSnapshot: shard={}, checkpoint={}", shardId, checkpoint);
         } catch (IOException e) {
-            throw new OpenSearchException("Error Closing SegmentInfos Snapshot", e);
+            logger.error("Error computing replication checkpoint from catalog snapshot for shard [{}]", shardId, e);
+            throw new OpenSearchException("Error computing replication checkpoint from catalog snapshot", e);
         }
     }
 

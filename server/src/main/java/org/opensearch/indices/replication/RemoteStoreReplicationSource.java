@@ -18,11 +18,14 @@ import org.apache.lucene.util.Version;
 import org.opensearch.common.concurrent.GatedCloseable;
 import org.opensearch.common.util.CancellableThreads;
 import org.opensearch.core.action.ActionListener;
+import org.opensearch.index.engine.exec.FileMetadata;
 import org.opensearch.index.shard.IndexShard;
 import org.opensearch.index.shard.IndexShardState;
+import org.opensearch.index.store.CompositeStoreDirectory;
 import org.opensearch.index.store.RemoteSegmentStoreDirectory;
 import org.opensearch.index.store.Store;
 import org.opensearch.index.store.StoreFileMetadata;
+import org.opensearch.index.store.remote.CompositeRemoteDirectory;
 import org.opensearch.index.store.remote.metadata.RemoteSegmentMetadata;
 import org.opensearch.indices.replication.checkpoint.RemoteStoreMergedSegmentCheckpoint;
 import org.opensearch.indices.replication.checkpoint.ReplicationCheckpoint;
@@ -51,14 +54,29 @@ public class RemoteStoreReplicationSource implements SegmentReplicationSource {
     private static final Logger logger = LogManager.getLogger(RemoteStoreReplicationSource.class);
 
     private final IndexShard indexShard;
-    private final RemoteSegmentStoreDirectory remoteDirectory;
+    private final CompositeRemoteDirectory compositeRemoteDirectory;
+    private final RemoteSegmentStoreDirectory remoteDirectory; // Fallback for legacy cases
     private final CancellableThreads cancellableThreads = new CancellableThreads();
 
     public RemoteStoreReplicationSource(IndexShard indexShard) {
         this.indexShard = indexShard;
+
+        // Try to get CompositeRemoteDirectory first, fallback to RemoteSegmentStoreDirectory
         FilterDirectory remoteStoreDirectory = (FilterDirectory) indexShard.remoteStore().directory();
         FilterDirectory byteSizeCachingStoreDirectory = (FilterDirectory) remoteStoreDirectory.getDelegate();
-        this.remoteDirectory = (RemoteSegmentStoreDirectory) byteSizeCachingStoreDirectory.getDelegate();
+        Directory underlyingDirectory = byteSizeCachingStoreDirectory.getDelegate();
+
+        if (underlyingDirectory instanceof RemoteSegmentStoreDirectory) {
+            // Current case - using RemoteSegmentStoreDirectory (which may internally use CompositeRemoteDirectory)
+            this.remoteDirectory = (RemoteSegmentStoreDirectory) underlyingDirectory;
+            this.compositeRemoteDirectory = null;
+            logger.debug("Using RemoteSegmentStoreDirectory for shard: {}", indexShard.shardId());
+        } else {
+            // Fallback case - should not happen in current architecture
+            logger.warn("Unexpected directory type: {} for shard: {}", underlyingDirectory.getClass(), indexShard.shardId());
+            this.remoteDirectory = null;
+            this.compositeRemoteDirectory = null;
+        }
     }
 
     @Override
@@ -135,8 +153,8 @@ public class RemoteStoreReplicationSource implements SegmentReplicationSource {
             }
             logger.debug("Downloading segment files from remote store {}", filesToFetch);
             if (remoteMetadataExists()) {
-                final Directory storeDirectory = indexShard.store().directory();
-                final Collection<String> directoryFiles = List.of(storeDirectory.listAll());
+                final CompositeStoreDirectory storeDirectory = indexShard.store().compositeStoreDirectory();
+                final Collection<FileMetadata> directoryFiles = List.of(storeDirectory.listAll());
                 final List<String> toDownloadSegmentNames = new ArrayList<>();
                 for (StoreFileMetadata fileMetadata : filesToFetch) {
                     String file = fileMetadata.name();
@@ -216,15 +234,23 @@ public class RemoteStoreReplicationSource implements SegmentReplicationSource {
         return "RemoteStoreReplicationSource";
     }
 
-    private boolean remoteMetadataExists() throws IOException {
-        final AtomicBoolean metadataExists = new AtomicBoolean(false);
-        cancellableThreads.executeIO(() -> metadataExists.set(remoteDirectory.readLatestMetadataFile() != null));
-        return metadataExists.get();
-    }
-
     private RemoteSegmentMetadata getRemoteSegmentMetadata() throws IOException {
+        if (remoteDirectory == null) {
+            throw new IllegalStateException("No remote directory available for shard: " + indexShard.shardId());
+        }
+
         AtomicReference<RemoteSegmentMetadata> mdFile = new AtomicReference<>();
         cancellableThreads.executeIO(() -> mdFile.set(remoteDirectory.init()));
         return mdFile.get();
+    }
+
+    private boolean remoteMetadataExists() throws IOException {
+        if (remoteDirectory == null) {
+            return false;
+        }
+
+        final AtomicBoolean metadataExists = new AtomicBoolean(false);
+        cancellableThreads.executeIO(() -> metadataExists.set(remoteDirectory.readLatestMetadataFile() != null));
+        return metadataExists.get();
     }
 }

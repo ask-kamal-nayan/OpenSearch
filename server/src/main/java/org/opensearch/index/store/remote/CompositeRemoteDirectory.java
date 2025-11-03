@@ -41,6 +41,10 @@ import org.opensearch.index.engine.exec.text.TextEngine;
 import org.opensearch.index.store.CompositeStoreDirectory;
 import org.opensearch.index.store.RemoteIndexInput;
 import org.opensearch.index.store.RemoteIndexOutput;
+import org.opensearch.index.store.RemoteSegmentStoreDirectory;
+import org.opensearch.index.store.remote.metadata.RemoteSegmentMetadata;
+import org.opensearch.index.store.remote.metadata.RemoteSegmentMetadataHandlerFactory;
+import org.opensearch.common.io.VersionedCodecStreamWrapper;
 import org.opensearch.plugins.DataSourcePlugin;
 import org.opensearch.plugins.PluginsService;
 
@@ -68,6 +72,16 @@ import java.util.stream.Collectors;
  */
 @PublicApi(since = "3.0.0")
 public class CompositeRemoteDirectory implements Closeable {
+
+    /**
+     * Metadata stream wrapper for reading/writing RemoteSegmentMetadata
+     */
+    private static final VersionedCodecStreamWrapper<RemoteSegmentMetadata> metadataStreamWrapper = new VersionedCodecStreamWrapper<>(
+        new RemoteSegmentMetadataHandlerFactory(),
+        RemoteSegmentMetadata.VERSION_ONE,
+        RemoteSegmentMetadata.CURRENT_VERSION,
+        RemoteSegmentMetadata.METADATA_CODEC
+    );
 
     private final UnaryOperator<OffsetRangeInputStream> uploadRateLimiter;
     private final UnaryOperator<OffsetRangeInputStream> lowPriorityUploadRateLimiter;
@@ -116,7 +130,7 @@ public class CompositeRemoteDirectory implements Closeable {
         this.logger = logger;
         this.any = null;
 
-        BlobPath metadataBlobPath = baseBlobPath.add("metadata");
+        BlobPath metadataBlobPath = baseBlobPath.parent().add("metadata");
         this.metadataBlobContainer = blobStore.blobContainer(metadataBlobPath);
 
         try {
@@ -683,6 +697,62 @@ public class CompositeRemoteDirectory implements Closeable {
      */
     public Map<String, BlobContainer> getFormatBlobContainers() {
         return Map.copyOf(formatBlobContainers);
+    }
+
+    // ===== Metadata reading methods for migration from RemoteSegmentStoreDirectory =====
+
+    /**
+     * Read the latest metadata file from the metadata blob container.
+     * This method provides compatibility with RemoteSegmentStoreDirectory.readLatestMetadataFile()
+     */
+    public RemoteSegmentMetadata readLatestMetadataFile() throws IOException {
+        try {
+            List<BlobMetadata> metadataFiles = metadataBlobContainer.listBlobsByPrefixInSortedOrder(
+                "metadata", 10, BlobContainer.BlobNameSortOrder.LEXICOGRAPHIC);
+            
+            if (metadataFiles.isEmpty()) {
+                logger.debug("No metadata files found in composite remote directory");
+                return null;
+            }
+            
+            // Get the latest (first in reverse lexicographic order)
+            String latestMetadataFile = metadataFiles.get(0).name();
+            logger.debug("Reading latest metadata file: {}", latestMetadataFile);
+            return readMetadataFile(latestMetadataFile);
+        } catch (Exception e) {
+            logger.error("Failed to read latest metadata file from composite directory", e);
+            throw new IOException("Failed to read latest metadata file", e);
+        }
+    }
+
+    /**
+     * Read a specific metadata file by name from the metadata blob container.
+     * This method provides compatibility with RemoteSegmentStoreDirectory.readMetadataFile()
+     */
+    public RemoteSegmentMetadata readMetadataFile(String metadataFileName) throws IOException {
+        try (InputStream inputStream = metadataBlobContainer.readBlob(metadataFileName)) {
+            byte[] metadataBytes = inputStream.readAllBytes();
+            
+            // Use our own metadata stream wrapper
+            return metadataStreamWrapper.readStream(
+                new ByteArrayIndexInput(metadataFileName, metadataBytes)
+            );
+        } catch (NoSuchFileException e) {
+            logger.debug("Metadata file not found: {}", metadataFileName);
+            return null;
+        } catch (Exception e) {
+            logger.error("Failed to read metadata file: {}", metadataFileName, e);
+            throw new IOException("Failed to read metadata file: " + metadataFileName, e);
+        }
+    }
+
+    /**
+     * Initialize and return metadata information.
+     * This method provides compatibility with RemoteSegmentStoreDirectory.init()
+     */
+    public RemoteSegmentMetadata init() throws IOException {
+        logger.debug("Initializing composite remote directory metadata");
+        return readLatestMetadataFile();
     }
 
     @Override

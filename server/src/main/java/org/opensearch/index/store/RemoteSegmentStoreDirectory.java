@@ -209,8 +209,16 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
 
     /**
      * Read the latest metadata file to get the list of segments uploaded to the remote segment store.
+     * Delegates to CompositeRemoteDirectory when available for better format-aware metadata handling.
      */
     public RemoteSegmentMetadata readLatestMetadataFile() throws IOException {
+        // Prefer CompositeRemoteDirectory for metadata reading if available
+        if (compositeRemoteDirectory != null) {
+            logger.debug("Reading latest metadata file from CompositeRemoteDirectory for better format-aware handling");
+            return compositeRemoteDirectory.readLatestMetadataFile();
+        }
+        
+        // Fallback to legacy remoteMetadataDirectory approach
         List<String> metadataFiles = remoteMetadataDirectory.listFilesByPrefixInLexicographicOrder(
             MetadataFilenameUtils.METADATA_PREFIX, METADATA_FILES_TO_FETCH);
 
@@ -218,10 +226,10 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
 
         if (!metadataFiles.isEmpty()) {
             String latestMetadataFile = metadataFiles.get(0);
-            logger.trace("Reading latest Metadata file {}", latestMetadataFile);
+            logger.info("Reading latest Metadata file {} from remoteMetadataDirectory", latestMetadataFile);
             return readMetadataFile(latestMetadataFile);
         } else {
-            logger.trace("No metadata file found, this can happen for new index with no data uploaded to remote segment store");
+            logger.info("No metadata file found, this can happen for new index with no data uploaded to remote segment store");
             return null;
         }
     }

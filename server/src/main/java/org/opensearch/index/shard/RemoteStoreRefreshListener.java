@@ -281,7 +281,7 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
                                 uploadMetadata(fileMetadataCollection, catalogSnapshot, checkpoint);
                                 logger.debug("Metadata upload successful");
                                 clearStaleFilesFromLocalSegmentChecksumMap(fileMetadataCollection);
-                                onSuccessfulSegmentsSync(
+                                 onSuccessfulSegmentsSync(
                                     refreshTimeMs,
                                     refreshClockTimeMs,
                                     refreshSeqNo,
