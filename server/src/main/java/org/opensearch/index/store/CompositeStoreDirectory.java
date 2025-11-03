@@ -439,14 +439,13 @@ public class CompositeStoreDirectory {
      * @param context IOContext providing performance hints for the operation
      * @throws IOException if the copy operation fails
      */
-    public void copyFrom(FileMetadata fileMetadata, Directory source, IOContext context) throws IOException {
+    public void copyFrom(FileMetadata fileMetadata, RemoteSegmentStoreDirectory source, IOContext context) throws IOException {
         FormatStoreDirectory targetDirectory = getDirectoryForFormat(fileMetadata.dataFormat());
         String fileName = fileMetadata.file();
 
         logger.debug("Copying file {} to format directory: {}", fileName, targetDirectory.getDataFormat().name());
 
-        // Use IndexInput/IndexOutput for the copy operation
-        try (IndexInput input = source.openInput(fileName, context);
+        try (IndexInput input = source.openInput(fileMetadata, context);
              IndexOutput output = createOutput(fileMetadata, context)) {
 
             output.copyBytes(input, input.length());

@@ -26,12 +26,17 @@ import org.opensearch.indices.replication.common.ReplicationFailedException;
 import org.opensearch.indices.replication.common.ReplicationListener;
 import org.opensearch.indices.replication.common.ReplicationLuceneIndex;
 import org.opensearch.indices.replication.common.ReplicationTarget;
+import org.opensearch.index.engine.exec.FileMetadata;
+import org.opensearch.index.engine.exec.coord.CatalogSnapshot;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.BiConsumer;
 import java.util.stream.Collectors;
@@ -215,7 +220,12 @@ public abstract class AbstractSegmentReplicationTarget extends ReplicationTarget
         if (indexShard.indexSettings().isWarmIndex()) {
             return Collections.emptyList();
         }
-        final Store.RecoveryDiff diff = Store.segmentReplicationDiff(checkpointInfo.getMetadataMap(), indexShard.getSegmentMetadataMap());
+
+        // Get format-aware metadata from checkpoint info
+        final Map<FileMetadata, StoreFileMetadata> sourceMetadataMap = checkpointInfo.getFormatAwareMetadataMap();
+        final Map<FileMetadata, StoreFileMetadata> targetMetadataMap = getIndexShardFormatAwareMetadataMap();
+        final Store.RecoveryDiff diff = Store.formatAwareSegmentReplicationDiff(sourceMetadataMap, targetMetadataMap);
+        
         // local files
         final Set<String> localFiles = Set.of(indexShard.store().directory().listAll());
         // set of local files that can be reused
@@ -231,7 +241,7 @@ public abstract class AbstractSegmentReplicationTarget extends ReplicationTarget
 
         logger.trace(
             () -> new ParameterizedMessage(
-                "Replication diff for checkpoint {} {} {}",
+                "Replication diff for checkpoint {} {} {} (format-aware)",
                 checkpointInfo.getCheckpoint(),
                 missingFiles,
                 diff.different
@@ -256,6 +266,92 @@ public abstract class AbstractSegmentReplicationTarget extends ReplicationTarget
             state.getIndex().addFileDetail(file.name(), file.length(), false);
         }
         return missingFiles;
+    }
+
+    /**
+     * Gets format-aware metadata map from IndexShard.
+     * This method converts the legacy String-based metadata to format-aware FileMetadata-based metadata.
+     */
+    private Map<FileMetadata, StoreFileMetadata> getIndexShardFormatAwareMetadataMap() throws IOException {
+        // Get legacy metadata from IndexShard
+        Map<String, StoreFileMetadata> legacyMetadata = indexShard.getSegmentMetadataMap();
+        
+        // Convert to format-aware metadata
+        Map<FileMetadata, StoreFileMetadata> formatAwareMap = new HashMap<>();
+        for (Map.Entry<String, StoreFileMetadata> entry : legacyMetadata.entrySet()) {
+            String fileName = entry.getKey();
+            StoreFileMetadata storeMetadata = entry.getValue();
+            
+            // Use the dataFormat from StoreFileMetadata if available, otherwise default to "lucene"
+            String dataFormat = storeMetadata.dataFormat() != null ? storeMetadata.dataFormat() : "lucene";
+            FileMetadata fileMetadata = new FileMetadata(dataFormat, fileName);
+            formatAwareMap.put(fileMetadata, storeMetadata);
+        }
+        
+        return formatAwareMap;
+    }
+
+    /**
+     * Extracts format-aware metadata from CheckpointInfoResponse.
+     * This method ensures that StoreFileMetadata instances contain proper format information
+     * by combining data from both the metadata map and CatalogSnapshot if available.
+     */
+    protected Map<String, StoreFileMetadata> getFormatAwareMetadataMap(CheckpointInfoResponse checkpointInfo) throws IOException {
+        Map<String, StoreFileMetadata> metadataMap = checkpointInfo.getMetadataMap();
+        
+        // If the CheckpointInfoResponse contains CatalogSnapshot bytes, use them to enrich metadata with format information
+        if (checkpointInfo.getInfosBytes() != null && checkpointInfo.getInfosBytes().length > 0) {
+            try {
+                CatalogSnapshot catalogSnapshot = deserializeCatalogSnapshotFromBytes(checkpointInfo.getInfosBytes());
+                return enrichMetadataWithFormat(metadataMap, catalogSnapshot);
+            } catch (Exception e) {
+                logger.warn("Failed to deserialize CatalogSnapshot for format-aware metadata, falling back to legacy metadata", e);
+            }
+        }
+        
+        return metadataMap;
+    }
+
+    /**
+     * Enriches StoreFileMetadata with format information from CatalogSnapshot.
+     */
+    private Map<String, StoreFileMetadata> enrichMetadataWithFormat(
+        Map<String, StoreFileMetadata> metadataMap, 
+        CatalogSnapshot catalogSnapshot
+    ) {
+        // Create a map of filename to format from CatalogSnapshot
+        Map<String, String> fileToFormatMap = catalogSnapshot.getFileMetadataList().stream()
+            .collect(Collectors.toMap(FileMetadata::file, FileMetadata::dataFormat, (existing, replacement) -> existing));
+
+        // Enrich existing metadata with format information
+        return metadataMap.entrySet().stream()
+            .collect(Collectors.toMap(
+                Map.Entry::getKey,
+                entry -> {
+                    StoreFileMetadata original = entry.getValue();
+                    String fileName = entry.getKey();
+                    String dataFormat = fileToFormatMap.getOrDefault(fileName, original.dataFormat());
+                    
+                    // Create new StoreFileMetadata with proper format information
+                    return new StoreFileMetadata(
+                        original.name(),
+                        original.length(),
+                        original.checksum(),
+                        original.writtenBy(),
+                        original.hash(),
+                        dataFormat
+                    );
+                }
+            ));
+    }
+
+    /**
+     * Deserializes CatalogSnapshot from byte array for metadata enrichment.
+     */
+    private CatalogSnapshot deserializeCatalogSnapshotFromBytes(byte[] infoBytes) throws IOException, ClassNotFoundException {
+        try (ByteArrayInputStream bais = new ByteArrayInputStream(infoBytes)) {
+            return CatalogSnapshot.readFrom(bais);
+        }
     }
 
     // pkg private for tests

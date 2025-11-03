@@ -34,6 +34,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -127,7 +128,8 @@ public class RemoteStoreReplicationSource implements SegmentReplicationSource {
                             e.getValue().getLength(),
                             Store.digestToString(Long.valueOf(e.getValue().getChecksum())),
                             version,
-                            null
+                            null, // BytesRef hash
+                            e.getKey().dataFormat() // dataFormat from FileMetadata key
                         )
                     )
                 );
@@ -151,22 +153,42 @@ public class RemoteStoreReplicationSource implements SegmentReplicationSource {
                 listener.onResponse(new GetSegmentFilesResponse(Collections.emptyList()));
                 return;
             }
-            logger.debug("Downloading segment files from remote store {}", filesToFetch);
+            logger.debug("Downloading format-aware segment files from remote store {}", filesToFetch);
             if (remoteMetadataExists()) {
                 final CompositeStoreDirectory storeDirectory = indexShard.store().compositeStoreDirectory();
-                final Collection<FileMetadata> directoryFiles = List.of(storeDirectory.listAll());
-                final List<String> toDownloadSegmentNames = new ArrayList<>();
-                for (StoreFileMetadata fileMetadata : filesToFetch) {
-                    String file = fileMetadata.name();
-                    assert directoryFiles.contains(file) == false : "Local store already contains the file " + file;
-                    toDownloadSegmentNames.add(file);
+                final List<FileMetadata> directoryFiles = List.of(storeDirectory.listAll());
+
+                // Convert StoreFileMetadata to FileMetadata for format-aware operations
+                final List<FileMetadata> toDownloadFileMetadata = new ArrayList<>();
+
+                for (StoreFileMetadata storeFileMetadata : filesToFetch) {
+                    String fileName = storeFileMetadata.name();
+                    String dataFormat = storeFileMetadata.dataFormat() != null ? storeFileMetadata.dataFormat() : "lucene";
+
+                    // Create FileMetadata for format-aware operations
+                    FileMetadata fileMetadata = new FileMetadata(dataFormat, fileName);
+
+                    // Verify file doesn't already exist in local directory
+                    assert directoryFiles.contains(fileMetadata) == false : "Local store already contains the file " + fileMetadata;
+
+                    toDownloadFileMetadata.add(fileMetadata);
+
+                    logger.trace("Queuing format-aware file for download: {} with format: {}", fileName, dataFormat);
                 }
+
+                // Use CompositeStoreDirectory with format-aware progress tracking
+                // The critical improvement: Now using FileMetadata for format-aware routing
+                final CompositeStoreDirectoryStatsWrapper statsWrapper = new CompositeStoreDirectoryStatsWrapper(storeDirectory, fileProgressTracker);
+
+
+                // Use new format-aware downloadAsync with CompositeStoreDirectoryStatsWrapper and FileMetadata
+                // This enables proper format-based routing: lucene files → LuceneStoreDirectory, parquet files → ParquetStoreDirectory
                 indexShard.getFileDownloader()
                     .downloadAsync(
                         cancellableThreads,
-                        remoteDirectory,
-                        new ReplicationStatsDirectoryWrapper(storeDirectory, fileProgressTracker),
-                        toDownloadSegmentNames,
+                        remoteDirectory,                    // RemoteSegmentStoreDirectory source
+                        statsWrapper,                       // CompositeStoreDirectoryStatsWrapper destination
+                        toDownloadFileMetadata,             // List<FileMetadata> with format information
                         ActionListener.map(listener, r -> new GetSegmentFilesResponse(filesToFetch))
                     );
             } else {

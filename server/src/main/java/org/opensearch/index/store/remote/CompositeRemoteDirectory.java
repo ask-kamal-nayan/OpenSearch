@@ -553,36 +553,34 @@ public class CompositeRemoteDirectory implements Closeable {
 
      /**
      * Get file length from the appropriate format-specific BlobContainer
-     * @param remoteFileName The name of the file to check
-     * @param dataFormat The data format
+     * @param fileMetadata The File Metadata
      * @return The length of the file
      * @throws IOException If the file is not found or on other IO errors
      */
-    public long fileLength(String remoteFileName, String dataFormat) throws IOException {
-        Optional<BlobContainer> containerOpt = findContainerForFile(remoteFileName, dataFormat);
+    public long fileLength(FileMetadata fileMetadata) throws IOException {
+        BlobContainer blobContainer = getBlobContainer(fileMetadata.dataFormat());
 
-        if (!containerOpt.isPresent()) {
+        if (blobContainer == null) {
             throw new NoSuchFileException(
-                String.format("File %s not found in any containers for format %s", remoteFileName, dataFormat)
+                String.format("File %s not found in any containers for format %s", fileMetadata.file(), fileMetadata.dataFormat())
             );
         }
 
         try {
-            BlobContainer container = containerOpt.get();
-            List<BlobMetadata> metadata = container.listBlobsByPrefixInSortedOrder(
-                remoteFileName, 1, BlobContainer.BlobNameSortOrder.LEXICOGRAPHIC);
+            List<BlobMetadata> metadata = blobContainer.listBlobsByPrefixInSortedOrder(
+                fileMetadata.file(), 1, BlobContainer.BlobNameSortOrder.LEXICOGRAPHIC);
 
-            if (metadata.size() == 1 && metadata.get(0).name().equals(remoteFileName)) {
+            if (metadata.size() == 1 && metadata.get(0).name().equals(fileMetadata.file())) {
                 return metadata.get(0).length();
             }
 
             // This should rarely happen as findContainerForFile already checked existence
             throw new NoSuchFileException(
-                String.format("File %s not found in container for format %s", remoteFileName, dataFormat)
+                String.format("File %s not found in container for format %s", fileMetadata.file(), fileMetadata.dataFormat())
             );
         } catch (IOException e) {
             throw new IOException(
-                String.format("Error getting length for file %s in format %s", remoteFileName, dataFormat), e
+                String.format("Error getting length for file %s in format %s", fileMetadata.file(), fileMetadata.dataFormat()), e
             );
         }
     }
@@ -620,24 +618,22 @@ public class CompositeRemoteDirectory implements Closeable {
     /**
      * Open input for reading from the appropriate format-specific BlobContainer
      */
-    public IndexInput openInput(String remoteFileName, String dataFormat, long fileLength, IOContext context) throws IOException {
-        if (remoteFileName == null || remoteFileName.isEmpty()) {
+    public IndexInput openInput(FileMetadata fileMetadata, long fileLength, IOContext context) throws IOException {
+        if (fileMetadata.file() == null || fileMetadata.file().isEmpty()) {
             throw new IllegalArgumentException("Remote file name cannot be null or empty");
         }
 
         InputStream inputStream = null;
         try {
             // Try to find existing container if file exists
-            Optional<BlobContainer> existingContainer = findContainerForFile(remoteFileName, dataFormat);
-            if (existingContainer.isEmpty()) {
-                throw new IOException(String.format("Failed to find blobContainer for file %s in format %s", remoteFileName, dataFormat));
+            BlobContainer blobContainer = getBlobContainer(fileMetadata.dataFormat());
+            if (blobContainer==null) {
+                throw new IOException(String.format("Failed to find blobContainer for file %s in format %s", fileMetadata.file(), fileMetadata.dataFormat()));
             }
 
-            BlobContainer blobContainer = existingContainer.get();
-
-            inputStream = blobContainer.readBlob(remoteFileName);
-            UnaryOperator<InputStream> rateLimiter = downloadRateLimiterProvider.get(remoteFileName);
-            return new RemoteIndexInput(remoteFileName, rateLimiter.apply(inputStream), fileLength);
+            inputStream = blobContainer.readBlob(fileMetadata.file());
+            UnaryOperator<InputStream> rateLimiter = downloadRateLimiterProvider.get(fileMetadata.file());
+            return new RemoteIndexInput(fileMetadata.file(), rateLimiter.apply(inputStream), fileLength);
         } catch (Exception e) {
             if (inputStream != null) {
                 try {
@@ -646,7 +642,7 @@ public class CompositeRemoteDirectory implements Closeable {
                     e.addSuppressed(closeEx);
                 }
             }
-            logger.error("Exception while reading blob for file: " + remoteFileName);
+            logger.error("Exception while reading blob for file: " + fileMetadata.file(), e);
             throw e;
         }
     }
@@ -709,12 +705,12 @@ public class CompositeRemoteDirectory implements Closeable {
         try {
             List<BlobMetadata> metadataFiles = metadataBlobContainer.listBlobsByPrefixInSortedOrder(
                 "metadata", 10, BlobContainer.BlobNameSortOrder.LEXICOGRAPHIC);
-            
+
             if (metadataFiles.isEmpty()) {
                 logger.debug("No metadata files found in composite remote directory");
                 return null;
             }
-            
+
             // Get the latest (first in reverse lexicographic order)
             String latestMetadataFile = metadataFiles.get(0).name();
             logger.debug("Reading latest metadata file: {}", latestMetadataFile);
@@ -732,7 +728,7 @@ public class CompositeRemoteDirectory implements Closeable {
     public RemoteSegmentMetadata readMetadataFile(String metadataFileName) throws IOException {
         try (InputStream inputStream = metadataBlobContainer.readBlob(metadataFileName)) {
             byte[] metadataBytes = inputStream.readAllBytes();
-            
+
             // Use our own metadata stream wrapper
             return metadataStreamWrapper.readStream(
                 new ByteArrayIndexInput(metadataFileName, metadataBytes)

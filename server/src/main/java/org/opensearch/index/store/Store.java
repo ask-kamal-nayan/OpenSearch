@@ -482,6 +482,51 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
     }
 
     /**
+     * Segment Replication method - Format-aware version
+     * Returns a diff between the Maps of FileMetadata->StoreFileMetadata that can be used for getting list of files to copy over to a replica for segment replication. The returned diff will hold a list of files that are:
+     * <ul>
+     * <li>identical: they exist in both maps and they can be considered the same ie. they don't need to be recovered</li>
+     * <li>different: they exist in both maps but their they are not identical</li>
+     * <li>missing: files that exist in the source but not in the target</li>
+     * </ul>
+     * This version is format-aware and compares files based on both filename and data format.
+     */
+    public static RecoveryDiff formatAwareSegmentReplicationDiff(Map<FileMetadata, StoreFileMetadata> source, Map<FileMetadata, StoreFileMetadata> target) {
+        final List<StoreFileMetadata> identical = new ArrayList<>();
+        final List<StoreFileMetadata> different = new ArrayList<>();
+        final List<StoreFileMetadata> missing = new ArrayList<>();
+        
+        for (Map.Entry<FileMetadata, StoreFileMetadata> sourceEntry : source.entrySet()) {
+            FileMetadata sourceFileMetadata = sourceEntry.getKey();
+            StoreFileMetadata sourceStoreMetadata = sourceEntry.getValue();
+            
+            // Skip segments files
+            if (sourceStoreMetadata.name().startsWith(IndexFileNames.SEGMENTS)) {
+                continue;
+            }
+            
+            // Check if target contains the same FileMetadata (format + filename)
+            if (target.containsKey(sourceFileMetadata) == false) {
+                missing.add(sourceStoreMetadata);
+            } else {
+                final StoreFileMetadata targetStoreMetadata = target.get(sourceFileMetadata);
+                // match segments using checksum and ensure format compatibility
+                if (targetStoreMetadata.checksum().equals(sourceStoreMetadata.checksum()) 
+                    && targetStoreMetadata.dataFormat().equals(sourceStoreMetadata.dataFormat())) {
+                    identical.add(sourceStoreMetadata);
+                } else {
+                    different.add(sourceStoreMetadata);
+                }
+            }
+        }
+        return new RecoveryDiff(
+            Collections.unmodifiableList(identical),
+            Collections.unmodifiableList(different),
+            Collections.unmodifiableList(missing)
+        );
+    }
+
+    /**
      * Renames all the given files from the key of the map to the
      * value of the map. All successfully renamed files are removed from the map in-place.
      */

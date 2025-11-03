@@ -235,6 +235,7 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
@@ -1833,6 +1834,31 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     }
 
     /**
+     * Finalizes replication using CatalogSnapshot instead of SegmentInfos.
+     * This method replaces the SegmentInfos-based approach with CatalogSnapshot
+     * to ensure consistent version tracking and format-aware segment management.
+     *
+     * @param catalogSnapshot the CatalogSnapshot containing segment metadata
+     * @throws IOException if an error occurs during replication finalization
+     */
+    public void finalizeReplication(CatalogSnapshot catalogSnapshot) throws IOException {
+        assert Thread.holdsLock(mutex) == false : "finalizeReplication must not be called under mutex";
+        assert state == IndexShardState.RECOVERING || state == IndexShardState.STARTED;
+
+        if (catalogSnapshot == null) {
+            logger.warn("Cannot finalize replication with null CatalogSnapshot for shard [{}]", shardId);
+            return;
+        }
+
+        // The CompositeEngine will manage its own catalog snapshots through normal operations
+        // We just need to ensure the replication checkpoint is updated to reflect the new state
+        updateReplicationCheckpoint();
+
+        logger.debug("Finalized replication with CatalogSnapshot: generation={}, version={}, shard={}",
+                    catalogSnapshot.getGeneration(), catalogSnapshot.getVersion(), shardId);
+    }
+
+    /**
      * The replica shard cleans up redundant pending merged segments based on the referenced segments of the primary shard.
      * Here, an example of generating redundant pending merged segments will be provided.
      * At time1, the primary shard merges _1.si and _2.si into segment _3.si. _3.si is pre-copied to the replica shard, which completed at time4.
@@ -1974,7 +2000,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         try {
             catalogSnapshot = getCatalogSnapshotFromEngine();
             final ReplicationCheckpoint checkpoint = computeReplicationCheckpoint(catalogSnapshot);
-            
+
             // Create a GatedCloseable wrapper for the catalog snapshot
             final CatalogSnapshot finalCatalogSnapshot = catalogSnapshot;
             GatedCloseable<CatalogSnapshot> gatedCatalogSnapshot = new GatedCloseable<>(catalogSnapshot, () -> {
@@ -1982,7 +2008,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                     finalCatalogSnapshot.decRef();
                 }
             });
-            
+
             logger.trace("Retrieved latest CatalogSnapshot and computed checkpoint: shard={}, checkpoint={}", shardId, checkpoint);
             return new Tuple<>(gatedCatalogSnapshot, checkpoint);
         } catch (IOException | AlreadyClosedException e) {
@@ -2015,25 +2041,48 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             return latestReplicationCheckpoint;
         }
 
-        // Use new CatalogSnapshot-based metadata loading instead of segmentInfos
-        final Map<String, StoreFileMetadata> metadataMap = Store.MetadataSnapshot.loadMetadata(
-            catalogSnapshot,
-            store.compositeStoreDirectory(),
-            logger,
-            true  // ignore segments file for checkpoint calculation
-        ).fileMetadata;
+        // Extract format-aware metadata directly from CatalogSnapshot
+        final Map<FileMetadata, StoreFileMetadata> formatAwareMetadataMap = extractFormatAwareMetadata(catalogSnapshot);
 
         final ReplicationCheckpoint checkpoint = new ReplicationCheckpoint(
             this.shardId,
             getOperationPrimaryTerm(),
             catalogSnapshot.getGeneration(),
             catalogSnapshot.getVersion(),
-            metadataMap.values().stream().mapToLong(StoreFileMetadata::length).sum(),
-            getEngine().config().getCodec().getName(),
-            metadataMap
+            formatAwareMetadataMap.values().stream().mapToLong(StoreFileMetadata::length).sum(),
+            formatAwareMetadataMap,
+            getEngine().config().getCodec().getName()
         );
         logger.trace("Recomputed ReplicationCheckpoint from CatalogSnapshot for shard {}", checkpoint);
         return checkpoint;
+    }
+
+    /**
+     * Extracts format-aware metadata from CatalogSnapshot.
+     * Creates a mapping from FileMetadata to StoreFileMetadata preserving format information.
+     */
+    private Map<FileMetadata, StoreFileMetadata> extractFormatAwareMetadata(CatalogSnapshot catalogSnapshot) throws IOException {
+        Map<FileMetadata, StoreFileMetadata> formatAwareMap = new HashMap<>();
+
+        for (FileMetadata fileMetadata : catalogSnapshot.getFileMetadataList()) {
+            try {
+                long fileLength = store.compositeStoreDirectory().fileLength(fileMetadata);
+                long checksum = store.compositeStoreDirectory().calculateChecksum(fileMetadata);
+
+                StoreFileMetadata storeFileMetadata = new StoreFileMetadata(
+                    fileMetadata.file(),
+                    fileLength,
+                    Long.toString(checksum),
+                    Version.LATEST
+                );
+                formatAwareMap.put(fileMetadata, storeFileMetadata);
+            } catch (IOException e) {
+                logger.warn("Failed to create StoreFileMetadata for {}", fileMetadata, e);
+            }
+        }
+
+        logger.debug("Extracted {} format-aware metadata entries from CatalogSnapshot", formatAwareMap.size());
+        return formatAwareMap;
     }
 
     ReplicationCheckpoint computeReplicationCheckpoint(SegmentInfos segmentInfos) throws IOException {
@@ -2047,7 +2096,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             return latestReplicationCheckpoint;
         }
         final Map<String, StoreFileMetadata> metadataMap = store.getSegmentMetadataMap(segmentInfos);
-        final ReplicationCheckpoint checkpoint = new ReplicationCheckpoint(
+        final ReplicationCheckpoint checkpoint = ReplicationCheckpoint.fromLegacyMetadata(
             this.shardId,
             getOperationPrimaryTerm(),
             segmentInfos.getGeneration(),
@@ -2247,6 +2296,23 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     public Map<String, StoreFileMetadata> getSegmentMetadataMap() throws IOException {
         try (final GatedCloseable<SegmentInfos> snapshot = getSegmentInfosSnapshot()) {
             return store.getSegmentMetadataMap(snapshot.get());
+        }
+    }
+
+    /**
+     * Fetch a format-aware map of FileMetadata to StoreFileMetadata from the latest CatalogSnapshot.
+     * This method preserves format information and is used for format-aware segment replication diffs.
+     *
+     * @return - Map of FileMetadata to StoreFileMetadata preserving format information
+     * @throws IOException - When there is an error loading metadata from the store.
+     */
+    public Map<FileMetadata, StoreFileMetadata> getFormatAwareSegmentMetadataMap() throws IOException {
+        try {
+            final CatalogSnapshot catalogSnapshot = getCatalogSnapshotFromEngine();
+            return extractFormatAwareMetadata(catalogSnapshot);
+        } catch (IOException e) {
+            logger.warn("Failed to get format-aware segment metadata", e);
+            return Collections.emptyMap();
         }
     }
 

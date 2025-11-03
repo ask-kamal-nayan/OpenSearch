@@ -217,7 +217,7 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
             logger.debug("Reading latest metadata file from CompositeRemoteDirectory for better format-aware handling");
             return compositeRemoteDirectory.readLatestMetadataFile();
         }
-        
+
         // Fallback to legacy remoteMetadataDirectory approach
         List<String> metadataFiles = remoteMetadataDirectory.listFilesByPrefixInLexicographicOrder(
             MetadataFilenameUtils.METADATA_PREFIX, METADATA_FILES_TO_FETCH);
@@ -466,6 +466,33 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
             listener.onFailure(new SegmentUploadFailedException(
                 String.format("Failed to upload file %s with format %s", fileName, fileMetadata.dataFormat()), e));
         }
+    }
+
+    /**
+     * Gets file length using FileMetadata for format-aware operations.
+     * First checks the uploaded segments cache, then falls back to compositeRemoteDirectory.
+     */
+    public long getFileLength(FileMetadata fileMetadata) throws IOException {
+        // Primary: Check uploaded segments cache
+        UploadedSegmentMetadata metadata = segmentsUploadedToRemoteStore.get(fileMetadata);
+        if (metadata != null) {
+            return metadata.getLength();
+        }
+
+        // Secondary: Use compositeRemoteDirectory if available
+        if (compositeRemoteDirectory != null) {
+            return compositeRemoteDirectory.fileLength(fileMetadata);
+        }
+
+        throw new FileNotFoundException("File length unavailable for: " + fileMetadata.file() + " format: " + fileMetadata.dataFormat());
+    }
+
+    public IndexInput openInput(FileMetadata fileMetadata, IOContext context) throws IOException {
+        long fileLength = getFileLength(fileMetadata);
+        String remoteFilename = getExistingRemoteFilename(fileMetadata);
+        FileMetadata remoteFileMetadata = new FileMetadata(fileMetadata.dataFormat(), remoteFilename);
+        return compositeRemoteDirectory.openInput(remoteFileMetadata, fileLength, context);
+
     }
 
     // ===== Deprecated methods for backward compatibility =====
