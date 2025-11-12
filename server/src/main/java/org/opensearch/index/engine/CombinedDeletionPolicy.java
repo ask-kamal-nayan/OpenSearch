@@ -70,7 +70,7 @@ public class CombinedDeletionPolicy extends IndexDeletionPolicy {
     private volatile IndexCommit lastCommit; // the most recent commit point
     private volatile SafeCommitInfo safeCommitInfo = SafeCommitInfo.EMPTY;
 
-    CombinedDeletionPolicy(
+    public CombinedDeletionPolicy(
         Logger logger,
         TranslogDeletionPolicy translogDeletionPolicy,
         SoftDeletesPolicy softDeletesPolicy,
@@ -152,7 +152,9 @@ public class CombinedDeletionPolicy extends IndexDeletionPolicy {
         assert safeCommit.isDeleted() == false : "The safe commit must not be deleted";
         assert lastCommit.isDeleted() == false : "The last commit must not be deleted";
         final long localCheckpointOfSafeCommit = Long.parseLong(safeCommit.getUserData().get(SequenceNumbers.LOCAL_CHECKPOINT_KEY));
-        softDeletesPolicy.setLocalCheckpointOfSafeCommit(localCheckpointOfSafeCommit);
+        if (softDeletesPolicy != null) {
+            softDeletesPolicy.setLocalCheckpointOfSafeCommit(localCheckpointOfSafeCommit);
+        }
         translogDeletionPolicy.setLocalCheckpointOfSafeCommit(localCheckpointOfSafeCommit);
     }
 
@@ -160,7 +162,11 @@ public class CombinedDeletionPolicy extends IndexDeletionPolicy {
         return SegmentInfos.readCommit(indexCommit.getDirectory(), indexCommit.getSegmentsFileName()).totalMaxDoc();
     }
 
-    SafeCommitInfo getSafeCommitInfo() {
+    public IndexCommit getLastCommit() {
+        return lastCommit;
+    }
+
+    public SafeCommitInfo getSafeCommitInfo() {
         return safeCommitInfo;
     }
 

@@ -57,6 +57,7 @@ import org.opensearch.core.common.unit.ByteSizeValue;
 import org.opensearch.core.index.Index;
 import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.index.engine.Engine;
+import org.opensearch.index.engine.exec.FileMetadata;
 import org.opensearch.index.engine.EngineException;
 import org.opensearch.index.mapper.MapperService;
 import org.opensearch.index.remote.RemoteStorePathStrategy;
@@ -643,47 +644,91 @@ final class StoreRecovery {
     }
 
     private void recoverFromRemoteStore(IndexShard indexShard) throws IndexShardRecoveryException {
-        final Store remoteStore = indexShard.remoteStore();
-        if (remoteStore == null) {
-            throw new IndexShardRecoveryException(
-                indexShard.shardId(),
-                "Remote store is not enabled for this index",
-                new IllegalArgumentException()
-            );
-        }
         indexShard.preRecovery();
         indexShard.prepareForIndexRecovery();
         final Store store = indexShard.store();
         store.incRef();
-        remoteStore.incRef();
+        
         try {
-            // Download segments from remote segment store
+            // Step 1: Download multi-format files from remote store
             indexShard.syncSegmentsFromRemoteSegmentStore(true);
+            
+            // Step 2: Download translog files from remote store
             indexShard.syncTranslogFilesFromRemoteTranslog();
-
-            // On index creation, the only segment file that is created is segments_N. We can safely discard this file
-            // as there is no data associated with this shard as part of segments.
-            if (store.directory().listAll().length <= 1) {
-                Path location = indexShard.shardPath().resolveTranslog();
-                Checkpoint checkpoint = Checkpoint.read(location.resolve(CHECKPOINT_FILE_NAME));
-                final Path translogFile = location.resolve(Translog.getFilename(checkpoint.getGeneration()));
-                try (FileChannel channel = FileChannel.open(translogFile, StandardOpenOption.READ)) {
-                    TranslogHeader translogHeader = TranslogHeader.read(translogFile, channel);
-                    store.createEmpty(indexShard.indexSettings().getIndexVersionCreated().luceneVersion, translogHeader.getTranslogUUID());
-                }
+            
+            // Step 3: Handle empty composite store case - ensure directories exist
+            if (isCompositeStoreEmpty(indexShard)) {
+                initializeEmptyCompositeStore(indexShard);
             }
-
+            
+            // Step 4: Create engines and recover from translog
+            // This creates both traditional Engine and CompositeEngine, then replays translog
             assert indexShard.shardRouting.primary() : "only primary shards can recover from store";
             indexShard.recoveryState().getIndex().setFileDetailsComplete();
             indexShard.openEngineAndRecoverFromTranslog();
-            indexShard.getEngine().fillSeqNoGaps(indexShard.getPendingPrimaryTerm());
+            
+            // Step 5: Fill sequence number gaps using CompositeEngine
+            indexShard.getIndexingExecutionCoordinator().fillSeqNoGaps(indexShard.getPendingPrimaryTerm());
+            
+            // Step 6: Finalize recovery
             indexShard.finalizeRecovery();
             indexShard.postRecovery("post recovery from remote_store");
+            
         } catch (IOException | IndexShardRecoveryException e) {
             throw new IndexShardRecoveryException(indexShard.shardId, "Exception while recovering from remote store", e);
         } finally {
             store.decRef();
-            remoteStore.decRef();
+        }
+    }
+
+    /**
+     * Checks if the composite store is empty across all format directories
+     */
+    private boolean isCompositeStoreEmpty(IndexShard indexShard) {
+        try {
+            FileMetadata[] allFiles = indexShard.store().compositeStoreDirectory().listAll();
+            // Check if we have any files other than lock files
+            for (FileMetadata fileMetadata : allFiles) {
+                if (!fileMetadata.file().equals("write.lock")) {
+                    return false; // Found data files
+                }
+            }
+            return true; // Only lock files or completely empty
+        } catch (Exception e) {
+            logger.debug("Error checking if composite store is empty, assuming not empty", e);
+            return false; // Assume not empty on error to be safe
+        }
+    }
+
+    /**
+     * Initializes an empty composite store with basic directory structure
+     * The CompositeEngine will be created later in openEngineAndRecoverFromTranslog()
+     */
+    private void initializeEmptyCompositeStore(IndexShard indexShard) throws IOException {
+        try {
+            // Initialize composite directory structure for all formats
+            if (indexShard.store().compositeStoreDirectory() != null) {
+                indexShard.store().compositeStoreDirectory().initialize();
+                logger.debug("Initialized empty composite store directories for shard [{}]", indexShard.shardId());
+            }
+            
+            // Create empty Lucene index for compatibility with openEngineAndRecoverFromTranslog()
+            final Store store = indexShard.store();
+            store.createEmpty(indexShard.indexSettings().getIndexVersionCreated().luceneVersion);
+            
+            // Create empty translog
+            final String translogUUID = Translog.createEmptyTranslog(
+                indexShard.shardPath().resolveTranslog(),
+                SequenceNumbers.NO_OPS_PERFORMED,
+                indexShard.shardId(),
+                indexShard.getPendingPrimaryTerm()
+            );
+            store.associateIndexWithNewTranslog(translogUUID);
+            
+            logger.debug("Initialized empty composite store and translog for shard [{}]", indexShard.shardId());
+        } catch (Exception e) {
+            logger.error("Failed to initialize empty composite store for shard [{}]", indexShard.shardId(), e);
+            throw new IOException("Failed to initialize empty composite store", e);
         }
     }
 

@@ -51,17 +51,17 @@ public class RemoteSegmentMetadata {
      */
     private final Map<FileMetadata, RemoteSegmentStoreDirectory.UploadedSegmentMetadata> metadata;
 
-    private final byte[] segmentInfosBytes;
+    private final byte[] catalogSnapshotBytes;
 
     private final ReplicationCheckpoint replicationCheckpoint;
 
     public RemoteSegmentMetadata(
         Map<FileMetadata, RemoteSegmentStoreDirectory.UploadedSegmentMetadata> metadata,
-        byte[] segmentInfosBytes,
+        byte[] catalogSnapshotBytes,
         ReplicationCheckpoint replicationCheckpoint
     ) {
         this.metadata = metadata;
-        this.segmentInfosBytes = segmentInfosBytes;
+        this.catalogSnapshotBytes = catalogSnapshotBytes;
         this.replicationCheckpoint = replicationCheckpoint;
     }
 
@@ -74,7 +74,11 @@ public class RemoteSegmentMetadata {
     }
 
     public byte[] getSegmentInfosBytes() {
-        return segmentInfosBytes;
+        return catalogSnapshotBytes; // Backward compatibility
+    }
+    
+    public byte[] getCatalogSnapshotBytes() {
+        return catalogSnapshotBytes;
     }
 
     public long getGeneration() {
@@ -133,8 +137,8 @@ public class RemoteSegmentMetadata {
     public void write(IndexOutput out) throws IOException {
         out.writeMapOfStrings(toMapOfStrings());
         writeCheckpointToIndexOutput(replicationCheckpoint, out);
-        out.writeLong(segmentInfosBytes.length);
-        out.writeBytes(segmentInfosBytes, segmentInfosBytes.length);
+        out.writeLong(catalogSnapshotBytes.length);
+        out.writeBytes(catalogSnapshotBytes, catalogSnapshotBytes.length);
     }
 
     /**
@@ -181,9 +185,9 @@ public class RemoteSegmentMetadata {
             final Map<FileMetadata, RemoteSegmentStoreDirectory.UploadedSegmentMetadata> emptyMap = new HashMap<>();
             ReplicationCheckpoint replicationCheckpoint = readCheckpointFromIndexInput(indexInput, new HashMap<>(), version);
             int byteArraySize = (int) indexInput.readLong();
-            byte[] segmentInfosBytes = new byte[byteArraySize];
-            indexInput.readBytes(segmentInfosBytes, 0, byteArraySize);
-            return new RemoteSegmentMetadata(emptyMap, segmentInfosBytes, replicationCheckpoint);
+            byte[] catalogSnapshotBytes = new byte[byteArraySize];
+            indexInput.readBytes(catalogSnapshotBytes, 0, byteArraySize);
+            return new RemoteSegmentMetadata(emptyMap, catalogSnapshotBytes, replicationCheckpoint);
         }
 
         // Now pass the properly converted map instead of null
@@ -199,9 +203,9 @@ public class RemoteSegmentMetadata {
 
         ReplicationCheckpoint replicationCheckpoint = readCheckpointFromIndexInput(indexInput, stringKeyedMap, version);
         int byteArraySize = (int) indexInput.readLong();
-        byte[] segmentInfosBytes = new byte[byteArraySize];
-        indexInput.readBytes(segmentInfosBytes, 0, byteArraySize);
-        return new RemoteSegmentMetadata(uploadedSegmentMetadataMap, segmentInfosBytes, replicationCheckpoint);
+        byte[] catalogSnapshotBytes = new byte[byteArraySize];
+        indexInput.readBytes(catalogSnapshotBytes, 0, byteArraySize);
+        return new RemoteSegmentMetadata(uploadedSegmentMetadataMap, catalogSnapshotBytes, replicationCheckpoint);
     }
 
     public static void writeCheckpointToIndexOutput(ReplicationCheckpoint replicationCheckpoint, IndexOutput out) throws IOException {

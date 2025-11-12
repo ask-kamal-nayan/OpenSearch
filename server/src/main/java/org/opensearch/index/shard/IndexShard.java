@@ -189,6 +189,7 @@ import org.opensearch.index.store.RemoteSegmentStoreDirectory;
 import org.opensearch.index.store.RemoteStoreFileDownloader;
 import org.opensearch.index.store.Store;
 import org.opensearch.index.store.Store.MetadataSnapshot;
+import org.opensearch.index.store.remote.CompositeRemoteDirectory;
 import org.opensearch.index.store.remote.metadata.RemoteSegmentMetadata;
 import org.opensearch.index.store.StoreFileMetadata;
 import org.opensearch.index.store.StoreStats;
@@ -2486,8 +2487,10 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         }
     }
 
-    /*
-    ToDo : Fix this https://github.com/opensearch-project/OpenSearch/issues/8003
+    /**
+     * Gets the RemoteSegmentStoreDirectory directly from the remoteStore.
+     * This method replaces the old FilterDirectory unwrapping pattern with direct access
+     * while maintaining the same interface for backward compatibility during the transition.
      */
     public RemoteSegmentStoreDirectory getRemoteDirectory() {
         assert indexSettings.isAssignedOnRemoteNode();
@@ -2817,7 +2820,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                         index.routing()
                     ),
                     index.id(),
-                    null
+                    currentCompositeEngineReference.get()::documentInput
                 );
                 break;
             case DELETE:
@@ -3037,6 +3040,19 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             onNewEngine(newEngine);
             currentEngineReference.set(newEngine);
             currentCompositeEngineReference.set(compositeEngine);
+
+            // Critical fix: Synchronize CompositeEngine CatalogSnapshot with downloaded remote segments
+            if (syncFromRemote && (indexSettings.isRemoteStoreEnabled() || this.isRemoteSeeded())) {
+                try {
+                    // Force CompositeEngine to refresh and pick up downloaded segments
+                    logger.debug("Synchronizing CompositeEngine CatalogSnapshot with downloaded remote segments for shard [{}]", shardId);
+                    compositeEngine.refresh("recovery_remote_segments_sync");
+                    logger.debug("Successfully synchronized CompositeEngine CatalogSnapshot with remote segments for shard [{}]", shardId);
+                } catch (Exception e) {
+                    logger.error("Failed to synchronize CompositeEngine CatalogSnapshot with remote segments for shard [{}]", shardId, e);
+                    throw new OpenSearchException("Failed to synchronize CompositeEngine with remote segments", e);
+                }
+            }
 
             if (indexSettings.isSegRepEnabledOrRemoteNode()) {
                 // set initial replication checkpoints into tracker.
@@ -4148,7 +4164,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
 
 
     public Indexer getIndexer() {
-        return getEngine();
+        return getIndexingExecutionCoordinator();
     }
 
     public CheckpointState getCheckpointState() {
@@ -4971,14 +4987,14 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
 
     public void sync() throws IOException {
         verifyNotClosed();
-        getEngine().translogManager().syncTranslog();
+        getIndexer().translogManager().syncTranslog();
     }
 
     /**
      * Checks if the underlying storage sync is required.
      */
     public boolean isSyncNeeded() {
-        return getEngine().translogManager().isTranslogSyncNeeded();
+        return getIndexer().translogManager().isTranslogSyncNeeded();
     }
 
     /**
@@ -5500,7 +5516,12 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
      */
     public void deleteRemoteStoreContents() throws IOException {
         deleteTranslogFilesFromRemoteTranslog();
-        getRemoteDirectory().delete();
+
+        // Use CompositeStoreDirectory to access remote directory instead of direct remoteStore field access
+        if (indexSettings.isAssignedOnRemoteNode()) {
+            RemoteSegmentStoreDirectory remoteDirectory = getRemoteDirectory();
+            remoteDirectory.delete();
+        }
     }
 
     public void syncTranslogFilesFromRemoteTranslog() throws IOException {
@@ -5569,11 +5590,11 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             .filter(entry -> entry.getKey().file().startsWith(IndexFileNames.SEGMENTS) == false)
             .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
         store.incRef();
-        remoteStore.incRef();
         try {
-            final Directory storeDirectory;
+            final CompositeStoreDirectory storeDirectory = store.compositeStoreDirectory();
+
+            // Add recovery progress tracking for INDEX stage
             if (recoveryState.getStage() == RecoveryState.Stage.INDEX) {
-                storeDirectory = new StoreRecovery.StatsDirectoryWrapper(store.directory(), recoveryState.getIndex());
                 for (FileMetadata file : uploadedSegments.keySet()) {
                     long checksum = Long.parseLong(uploadedSegments.get(file).getChecksum());
                     if (overrideLocal || localDirectoryContains(storeDirectory, file, checksum) == false) {
@@ -5582,31 +5603,30 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                         recoveryState.getIndex().addFileDetail(file.file(), uploadedSegments.get(file).getLength(), true);
                     }
                 }
-            } else {
-                storeDirectory = store.directory();
             }
 
+            // Download files using format-aware routing
             if (indexSettings.isWarmIndex() == false) {
-                // ToDo:@Kamal update while restore implementation
-                // copySegmentFiles(storeDirectory, remoteDirectory, null, uploadedSegments, overrideLocal, onFileSync);
+                copySegmentFiles(storeDirectory, remoteDirectory, null, uploadedSegments, overrideLocal, onFileSync);
             }
 
             if (remoteSegmentMetadata != null) {
-                final SegmentInfos infosSnapshot = store.buildSegmentInfos(
-                    remoteSegmentMetadata.getSegmentInfosBytes(),
-                    remoteSegmentMetadata.getGeneration()
-                );
-                long processedLocalCheckpoint = Long.parseLong(infosSnapshot.getUserData().get(LOCAL_CHECKPOINT_KEY));
-                // delete any other commits, we want to start the engine only from a new commit made with the downloaded infos bytes.
-                // Extra segments will be wiped on engine open.
-                for (String file : List.of(store.directory().listAll())) {
-                    if (file.startsWith(IndexFileNames.SEGMENTS)) {
-                        store.deleteQuiet(file);
-                    }
+                try {
+                    // Use CatalogSnapshot approach for multi-format recovery (same as syncSegmentsFromGivenRemoteSegmentStore)
+                    CatalogSnapshot catalogSnapshot = CatalogSnapshot.readFrom(
+                        new java.io.ByteArrayInputStream(remoteSegmentMetadata.getCatalogSnapshotBytes())
+                    );
+
+                    // Apply CatalogSnapshot to CompositeEngine with path remapping
+                    getIndexingExecutionCoordinator().setCatalogSnapshot(catalogSnapshot, this.shardPath());
+                    getIndexingExecutionCoordinator().updateSearchEngine();
+
+                    logger.debug("Successfully applied CatalogSnapshot from primary remote store recovery: generation={}, version={}",
+                                catalogSnapshot.getGeneration(), catalogSnapshot.getVersion());
+                } catch (IOException | ClassNotFoundException e) {
+                    logger.error("Failed to deserialize CatalogSnapshot from primary remote store metadata", e);
+                    throw new IOException("Failed to deserialize CatalogSnapshot from primary remote store metadata", e);
                 }
-                assert Arrays.stream(store.directory().listAll()).filter(f -> f.startsWith(IndexFileNames.SEGMENTS)).findAny().isEmpty()
-                    || indexSettings.isWarmIndex() : "There should not be any segments file in the dir";
-                store.commitSegmentInfos(infosSnapshot, processedLocalCheckpoint, processedLocalCheckpoint);
             }
             syncSegmentSuccess = true;
         } catch (IOException e) {
@@ -5618,7 +5638,6 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                 (System.currentTimeMillis() - startTimeMs)
             );
             store.decRef();
-            remoteStore.decRef();
         }
     }
 
@@ -5635,10 +5654,72 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         RemoteSegmentMetadata remoteSegmentMetadata,
         boolean pinnedTimestamp
     ) throws IOException {
-        throw new UnsupportedOperationException("Not implemented yet");
+        boolean syncSegmentSuccess = false;
+        long startTimeMs = System.currentTimeMillis();
+        logger.trace("Downloading segments from remote segment store using format-aware recovery");
+
+        try {
+            // Step 1: Get format-aware file metadata from remote
+            Map<FileMetadata, RemoteSegmentStoreDirectory.UploadedSegmentMetadata> uploadedSegments =
+                sourceRemoteDirectory.getSegmentsUploadedToRemoteStore()
+                    .entrySet()
+                    .stream()
+                    .filter(entry -> entry.getKey().file().startsWith(IndexFileNames.SEGMENTS) == false)
+                    .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+
+            store.incRef();
+
+            try {
+                final CompositeStoreDirectory storeDirectory = store.compositeStoreDirectory();
+
+                // Add recovery progress tracking
+                if (recoveryState.getStage() == RecoveryState.Stage.INDEX) {
+                    for (FileMetadata fileMetadata : uploadedSegments.keySet()) {
+                        long checksum = Long.parseLong(uploadedSegments.get(fileMetadata).getChecksum());
+                        if (overrideLocal || localDirectoryContains(storeDirectory, fileMetadata, checksum) == false) {
+                            recoveryState.getIndex().addFileDetail(fileMetadata.file(), uploadedSegments.get(fileMetadata).getLength(), false);
+                        } else {
+                            recoveryState.getIndex().addFileDetail(fileMetadata.file(), uploadedSegments.get(fileMetadata).getLength(), true);
+                        }
+                    }
+                }
+
+                // Step 2: Download files using format-aware routing
+                if (indexSettings.isWarmIndex() == false) {
+                    copySegmentFiles(storeDirectory, sourceRemoteDirectory, null, uploadedSegments, overrideLocal, () -> {});
+                }
+
+                // Step 3: Reconstruct CatalogSnapshot from remote metadata and apply to engine
+                if (remoteSegmentMetadata != null) {
+                    try {
+                        CatalogSnapshot catalogSnapshot = CatalogSnapshot.readFrom(
+                            new java.io.ByteArrayInputStream(remoteSegmentMetadata.getCatalogSnapshotBytes())
+                        );
+
+                        // Step 4: Use existing recovery pattern (same as local recovery!)
+                        getIndexingExecutionCoordinator().setCatalogSnapshot(catalogSnapshot, this.shardPath());
+                        getIndexingExecutionCoordinator().updateSearchEngine();
+
+                        logger.debug("Successfully applied CatalogSnapshot from remote recovery: generation={}, version={}",
+                                    catalogSnapshot.getGeneration(), catalogSnapshot.getVersion());
+                    } catch (IOException | ClassNotFoundException e) {
+                        logger.error("Failed to deserialize CatalogSnapshot from remote metadata", e);
+                        throw new IOException("Failed to deserialize CatalogSnapshot from remote metadata", e);
+                    }
+                }
+
+                syncSegmentSuccess = true;
+            } finally {
+                store.decRef();
+            }
+        } catch (IOException e) {
+            throw new IndexShardRecoveryException(shardId, "Exception while copying segment files from remote segment store", e);
+        } finally {
+            logger.trace("syncSegmentsFromGivenRemoteSegmentStore success={} elapsedTime={}",
+                        syncSegmentSuccess, (System.currentTimeMillis() - startTimeMs));
+        }
     }
 
-    // ToDo: Needs to be updated while Replication flow implementation
     private String copySegmentFiles(
         CompositeStoreDirectory storeDirectory,
         RemoteSegmentStoreDirectory sourceRemoteDirectory,
@@ -5674,9 +5755,24 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
 
             if (toDownloadSegments.isEmpty() == false) {
                 try {
-                    // ToDo: @Kamal, Implement while restore flow implementation.
-                    // fileDownloader.download(sourceRemoteDirectory, storeDirectory, targetRemoteDirectory, toDownloadSegments, onFileSync);
+                    // Download each file using format-aware routing through CompositeStoreDirectory
+                    for (FileMetadata fileMetadata : uploadedSegments.keySet()) {
+                        if (toDownloadSegments.contains(fileMetadata.file())) {
+                            logger.debug("Downloading format-aware file: {}, format: {}",
+                                        fileMetadata.file(), fileMetadata.dataFormat());
+
+                            // Use CompositeStoreDirectory's format-aware copyFrom method
+                            storeDirectory.copyFrom(fileMetadata, sourceRemoteDirectory, IOContext.DEFAULT);
+
+                            // Call progress callback
+                            onFileSync.run();
+
+                            logger.trace("Successfully downloaded file: {}, format: {}",
+                                        fileMetadata.file(), fileMetadata.dataFormat());
+                        }
+                    }
                 } catch (Exception e) {
+                    logger.error("Error occurred when downloading segments from remote store", e);
                     throw new IOException("Error occurred when downloading segments from remote store", e);
                 }
             }
@@ -5688,9 +5784,37 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         return segmentNFile;
     }
 
-    // ToDo: @Kamal
     boolean localDirectoryContains(CompositeStoreDirectory localDirectory, FileMetadata fileMetadata, long checksum) throws IOException {
-        throw new UnsupportedOperationException("Not implemented yet");
+        try {
+            // Use existing CompositeStoreDirectory checksum calculation (format-aware)
+            long localChecksum = localDirectory.calculateChecksum(fileMetadata);
+
+            if (checksum == localChecksum) {
+                logger.debug("Checksum match for file: {}, format: {}", fileMetadata.file(), fileMetadata.dataFormat());
+                return true;
+            } else {
+                logger.warn("Checksum mismatch for file: {}, format: {}, expected: {}, local: {}, will override",
+                           fileMetadata.file(), fileMetadata.dataFormat(), checksum, localChecksum);
+                // If there is a checksum mismatch and we are not serving reads it is safe to go ahead and delete the file now.
+                // Outside of engine resets this method will be invoked during recovery so this is safe.
+                if (isReadAllowed() == false) {
+                    localDirectory.deleteFile(fileMetadata);
+                } else {
+                    // segment conflict with remote store while the shard is serving reads.
+                    failShard("Local copy of segment " + fileMetadata.file() + " has a different checksum than the version in remote store", null);
+                }
+            }
+        } catch (NoSuchFileException | FileNotFoundException e) {
+            logger.debug("File {} with format {} does not exist in local FS, downloading from remote store",
+                        fileMetadata.file(), fileMetadata.dataFormat());
+        } catch (IOException e) {
+            logger.warn("Exception while reading checksum of file: {}, format: {}, this can happen if file is corrupted",
+                       fileMetadata.file(), fileMetadata.dataFormat(), e);
+            // For any other exception on reading checksum, we delete the file to re-download again
+            localDirectory.deleteFile(fileMetadata);
+        }
+
+        return false;
     }
 
     // ToDo: @Kamal
