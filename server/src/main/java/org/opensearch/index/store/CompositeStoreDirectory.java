@@ -31,6 +31,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Composite directory that coordinates multiple format-specific directories.
@@ -52,6 +54,13 @@ public class CompositeStoreDirectory {
     private final Logger logger;
     private final DirectoryFileTransferTracker directoryFileTransferTracker;
     private final ShardPath shardPath;
+
+    /**
+     * Per-format locks to prevent concurrent access to the same format directory.
+     * This prevents LockObtainFailedException when multiple threads try to write
+     * to the same underlying format directory simultaneously.
+     */
+    private final Map<String, ReentrantLock> formatLocks = new ConcurrentHashMap<>();
 
     /**
      * Simplified constructor for auto-discovery (like CompositeIndexingExecutionEngine)
@@ -199,22 +208,39 @@ public class CompositeStoreDirectory {
     }
 
     /**
-     * Copies a file from another directory using FileMetadata for format routing
+     * Copies a file from another directory using FileMetadata for format routing.
+     * This method is thread-safe and uses per-format locking to prevent concurrent
+     * access to the same format directory, which prevents LockObtainFailedException.
+     * 
      * @param fileMetadata the FileMetadata containing format and filename information
      * @param source the source Directory to copy from
      * @param context IOContext providing performance hints for the operation
      * @throws IOException if the copy operation fails
      */
     public void copyFrom(FileMetadata fileMetadata, RemoteSegmentStoreDirectory source, IOContext context) throws IOException {
-        FormatStoreDirectory<?> targetDirectory = getDirectoryForFormat(fileMetadata.dataFormat());
+        String format = fileMetadata.dataFormat();
         String fileName = fileMetadata.file();
+        
+        // Get or create a lock for this specific format
+        ReentrantLock formatLock = formatLocks.computeIfAbsent(format, k -> new ReentrantLock());
+        
+        logger.trace("Acquiring format lock for file {} with format {}", fileName, format);
+        formatLock.lock();
+        try {
+            FormatStoreDirectory<?> targetDirectory = getDirectoryForFormat(format);
+            
+            logger.debug("Copying file {} to format directory: {} (thread-safe)", fileName, targetDirectory.getDataFormat().name());
 
-        logger.debug("Copying file {} to format directory: {}", fileName, targetDirectory.getDataFormat().name());
+            try (IndexInput input = source.openInput(fileMetadata, context);
+                 IndexOutput output = createOutput(fileMetadata, context)) {
 
-        try (IndexInput input = source.openInput(fileMetadata, context);
-             IndexOutput output = createOutput(fileMetadata, context)) {
-
-            output.copyBytes(input, input.length());
+                output.copyBytes(input, input.length());
+            }
+            
+            logger.trace("Successfully copied file {} with format {}", fileName, format);
+        } finally {
+            formatLock.unlock();
+            logger.trace("Released format lock for file {} with format {}", fileName, format);
         }
     }
 

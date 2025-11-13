@@ -408,6 +408,9 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     private final MergedSegmentPublisher mergedSegmentPublisher;
     private final ReferencedSegmentsPublisher referencedSegmentsPublisher;
     private final Set<MergedSegmentCheckpoint> pendingMergedSegmentCheckpoints = Sets.newConcurrentHashSet();
+    
+    // Field to store CatalogSnapshot during recovery when CompositeEngine is not yet available
+    private volatile CatalogSnapshot pendingRecoveryCatalogSnapshot;
     @InternalApi
     public IndexShard(
         final ShardRouting shardRouting,
@@ -593,6 +596,36 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         } catch (IOException e) {
             logger.error("Failed to complete CompositeEngine initialization for shard [{}]", shardId, e);
             throw new RuntimeException("Failed to complete CompositeEngine initialization", e);
+        }
+    }
+
+    /**
+     * Applies any pending recovery CatalogSnapshot that was stored during segment sync
+     * when the CompositeEngine was not yet available. This should be called after
+     * CompositeEngine creation but before initialization.
+     * 
+     * @throws IOException if there is an error applying the CatalogSnapshot
+     */
+    private void applyPendingRecoveryCatalogSnapshot() throws IOException {
+        if (pendingRecoveryCatalogSnapshot != null) {
+            try {
+                logger.debug("Applying pending recovery CatalogSnapshot for shard [{}]: generation={}, version={}",
+                           shardId, pendingRecoveryCatalogSnapshot.getGeneration(), pendingRecoveryCatalogSnapshot.getVersion());
+                
+                // Apply the CatalogSnapshot to CompositeEngine
+                getIndexingExecutionCoordinator().setCatalogSnapshot(pendingRecoveryCatalogSnapshot, this.shardPath());
+                getIndexingExecutionCoordinator().updateSearchEngine();
+                
+                logger.debug("Successfully applied pending recovery CatalogSnapshot for shard [{}]", shardId);
+                
+                // Clear the pending snapshot after successful application
+                pendingRecoveryCatalogSnapshot = null;
+            } catch (Exception e) {
+                logger.error("Failed to apply pending recovery CatalogSnapshot for shard [{}]", shardId, e);
+                // Clear the pending snapshot even on failure to prevent repeated attempts
+                pendingRecoveryCatalogSnapshot = null;
+                throw new IOException("Failed to apply pending recovery CatalogSnapshot", e);
+            }
         }
     }
 
@@ -1946,13 +1979,14 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     /**
      * Snapshots the most recent safe index commit from the currently running engine.
      * All index files referenced by this index commit won't be freed until the commit/snapshot is closed.
-     * TODO: This method changes
+     * Fixed to work with CompositeEngine for replica recovery.
      */
     public GatedCloseable<IndexCommit> acquireSafeIndexCommit() throws EngineException {
         final IndexShardState state = this.state; // one time volatile read
         // we allow snapshot on closed index shard, since we want to do one after we close the shard and before we close the engine
         if (state == IndexShardState.STARTED || state == IndexShardState.CLOSED) {
-            return getEngine().acquireSafeIndexCommit();
+            // Use CompositeEngine instead of old engine interface to fix replica recovery
+            return getIndexingExecutionCoordinator().acquireSafeIndexCommit();
         } else {
             throw new IllegalIndexShardStateException(shardId, state, "snapshot is not allowed");
         }
@@ -3040,6 +3074,11 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             onNewEngine(newEngine);
             currentEngineReference.set(newEngine);
             currentCompositeEngineReference.set(compositeEngine);
+            
+            // Apply any pending CatalogSnapshot that was stored during segment sync before completing initialization
+            applyPendingRecoveryCatalogSnapshot();
+            
+            completeCompositeEngineInitialization();
 
             // Critical fix: Synchronize CompositeEngine CatalogSnapshot with downloaded remote segments
             if (syncFromRemote && (indexSettings.isRemoteStoreEnabled() || this.isRemoteSeeded())) {
@@ -5610,24 +5649,49 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                 copySegmentFiles(storeDirectory, remoteDirectory, null, uploadedSegments, overrideLocal, onFileSync);
             }
 
-            if (remoteSegmentMetadata != null) {
-                try {
-                    // Use CatalogSnapshot approach for multi-format recovery (same as syncSegmentsFromGivenRemoteSegmentStore)
-                    CatalogSnapshot catalogSnapshot = CatalogSnapshot.readFrom(
-                        new java.io.ByteArrayInputStream(remoteSegmentMetadata.getCatalogSnapshotBytes())
-                    );
+                if (remoteSegmentMetadata != null) {
+                    try {
+                        // Validate remote metadata before attempting deserialization
+                        byte[] catalogSnapshotBytes = remoteSegmentMetadata.getCatalogSnapshotBytes();
+                        if (catalogSnapshotBytes == null || catalogSnapshotBytes.length == 0) {
+                            logger.warn("Remote segment metadata contains empty or null CatalogSnapshot bytes for shard [{}]", shardId);
+                            return; // Skip CatalogSnapshot processing if metadata is invalid
+                        }
 
-                    // Apply CatalogSnapshot to CompositeEngine with path remapping
-                    getIndexingExecutionCoordinator().setCatalogSnapshot(catalogSnapshot, this.shardPath());
-                    getIndexingExecutionCoordinator().updateSearchEngine();
+                        // Use CatalogSnapshot approach for multi-format recovery (same as syncSegmentsFromGivenRemoteSegmentStore)
+                        CatalogSnapshot catalogSnapshot = CatalogSnapshot.readFrom(
+                            new java.io.ByteArrayInputStream(catalogSnapshotBytes)
+                        );
 
-                    logger.debug("Successfully applied CatalogSnapshot from primary remote store recovery: generation={}, version={}",
-                                catalogSnapshot.getGeneration(), catalogSnapshot.getVersion());
-                } catch (IOException | ClassNotFoundException e) {
-                    logger.error("Failed to deserialize CatalogSnapshot from primary remote store metadata", e);
-                    throw new IOException("Failed to deserialize CatalogSnapshot from primary remote store metadata", e);
+                        // Validate deserialized snapshot
+                        if (catalogSnapshot == null) {
+                            logger.warn("Deserialized CatalogSnapshot is null for shard [{}], skipping catalog update", shardId);
+                            return;
+                        }
+
+                        // Check if CompositeEngine is available - if not, store for later application
+                        CompositeEngine compositeEngine = getIndexingExecutionCoordinator();
+                        if (compositeEngine == null) {
+                            logger.debug("CompositeEngine not yet available, storing CatalogSnapshot for deferred application for shard [{}]", shardId);
+                            pendingRecoveryCatalogSnapshot = catalogSnapshot;
+                        } else {
+                            // Apply CatalogSnapshot to CompositeEngine with path remapping
+                            compositeEngine.setCatalogSnapshot(catalogSnapshot, this.shardPath());
+                            compositeEngine.updateSearchEngine();
+                            logger.debug("Successfully applied CatalogSnapshot from primary remote store recovery: generation={}, version={}",
+                                        catalogSnapshot.getGeneration(), catalogSnapshot.getVersion());
+                        }
+                    } catch (IOException e) {
+                        logger.error("Failed to deserialize CatalogSnapshot from primary remote store metadata for shard [{}]", shardId, e);
+                        throw new IndexShardRecoveryException(shardId, "Failed to deserialize CatalogSnapshot from remote store metadata", e);
+                    } catch (ClassNotFoundException e) {
+                        logger.error("ClassNotFoundException while deserializing CatalogSnapshot for shard [{}], possibly due to version incompatibility", shardId, e);
+                        throw new IndexShardRecoveryException(shardId, "ClassNotFoundException during CatalogSnapshot deserialization", e);
+                    } catch (Exception e) {
+                        logger.error("Unexpected error during CatalogSnapshot processing for shard [{}]", shardId, e);
+                        throw new IndexShardRecoveryException(shardId, "Unexpected error during CatalogSnapshot processing", e);
+                    }
                 }
-            }
             syncSegmentSuccess = true;
         } catch (IOException e) {
             throw new IndexShardRecoveryException(shardId, "Exception while copying segment files from remote segment store", e);
@@ -5692,19 +5756,44 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                 // Step 3: Reconstruct CatalogSnapshot from remote metadata and apply to engine
                 if (remoteSegmentMetadata != null) {
                     try {
+                        // Validate remote metadata before attempting deserialization
+                        byte[] catalogSnapshotBytes = remoteSegmentMetadata.getCatalogSnapshotBytes();
+                        if (catalogSnapshotBytes == null || catalogSnapshotBytes.length == 0) {
+                            logger.warn("Remote segment metadata contains empty or null CatalogSnapshot bytes for shard [{}]", shardId);
+                            return; // Skip CatalogSnapshot processing if metadata is invalid
+                        }
+
                         CatalogSnapshot catalogSnapshot = CatalogSnapshot.readFrom(
-                            new java.io.ByteArrayInputStream(remoteSegmentMetadata.getCatalogSnapshotBytes())
+                            new java.io.ByteArrayInputStream(catalogSnapshotBytes)
                         );
 
-                        // Step 4: Use existing recovery pattern (same as local recovery!)
-                        getIndexingExecutionCoordinator().setCatalogSnapshot(catalogSnapshot, this.shardPath());
-                        getIndexingExecutionCoordinator().updateSearchEngine();
+                        // Validate deserialized snapshot
+                        if (catalogSnapshot == null) {
+                            logger.warn("Deserialized CatalogSnapshot is null for shard [{}], skipping catalog update", shardId);
+                            return;
+                        }
 
-                        logger.debug("Successfully applied CatalogSnapshot from remote recovery: generation={}, version={}",
-                                    catalogSnapshot.getGeneration(), catalogSnapshot.getVersion());
-                    } catch (IOException | ClassNotFoundException e) {
-                        logger.error("Failed to deserialize CatalogSnapshot from remote metadata", e);
-                        throw new IOException("Failed to deserialize CatalogSnapshot from remote metadata", e);
+                        // Check if CompositeEngine is available - if not, store for later application
+                        CompositeEngine compositeEngine = getIndexingExecutionCoordinator();
+                        if (compositeEngine == null) {
+                            logger.debug("CompositeEngine not yet available, storing CatalogSnapshot for deferred application for shard [{}]", shardId);
+                            pendingRecoveryCatalogSnapshot = catalogSnapshot;
+                        } else {
+                            // Step 4: Use existing recovery pattern (same as local recovery!)
+                            compositeEngine.setCatalogSnapshot(catalogSnapshot, this.shardPath());
+                            compositeEngine.updateSearchEngine();
+                            logger.debug("Successfully applied CatalogSnapshot from remote recovery: generation={}, version={}",
+                                        catalogSnapshot.getGeneration(), catalogSnapshot.getVersion());
+                        }
+                    } catch (IOException e) {
+                        logger.error("Failed to deserialize CatalogSnapshot from remote metadata for shard [{}]", shardId, e);
+                        throw new IndexShardRecoveryException(shardId, "Failed to deserialize CatalogSnapshot from remote metadata", e);
+                    } catch (ClassNotFoundException e) {
+                        logger.error("ClassNotFoundException while deserializing CatalogSnapshot for shard [{}], possibly due to version incompatibility", shardId, e);
+                        throw new IndexShardRecoveryException(shardId, "ClassNotFoundException during CatalogSnapshot deserialization", e);
+                    } catch (Exception e) {
+                        logger.error("Unexpected error during CatalogSnapshot processing for shard [{}]", shardId, e);
+                        throw new IndexShardRecoveryException(shardId, "Unexpected error during CatalogSnapshot processing", e);
                     }
                 }
 

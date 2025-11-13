@@ -57,14 +57,22 @@ public class CatalogSnapshot extends AbstractRefCounted implements Writeable {
         this.version = version;
         this.userData = new HashMap<>();
         this.dfGroupedSearchableFiles = new HashMap<>();
-        if (refreshResult != null) {
-            refreshResult.getRefreshedFiles().forEach((dataFormat, writerFiles) -> dfGroupedSearchableFiles.put(dataFormat.name(), writerFiles));
-        }
         this.lastWriterGeneration = -1;
-        refreshResult.getRefreshedFiles().forEach((dataFormat, writerFiles) -> {
-            dfGroupedSearchableFiles.put(dataFormat.name(), writerFiles);
-            writerFiles.stream().mapToLong(WriterFileSet::getWriterGeneration).max().ifPresent(value -> this.lastWriterGeneration = value);
-        });
+        
+        if (refreshResult != null) {
+            // Process refreshed files and calculate max writer generation in a single pass
+            refreshResult.getRefreshedFiles().forEach((dataFormat, writerFiles) -> {
+                dfGroupedSearchableFiles.put(dataFormat.name(), writerFiles);
+                // Calculate max generation for this data format
+                long maxGen = writerFiles.stream()
+                    .mapToLong(WriterFileSet::getWriterGeneration)
+                    .max()
+                    .orElse(-1);
+                if (maxGen > this.lastWriterGeneration) {
+                    this.lastWriterGeneration = maxGen;
+                }
+            });
+        }
     }
 
     private CatalogSnapshot(long id, Map<String, Collection<WriterFileSet>> dfGroupedSearchableFiles) {
@@ -278,45 +286,105 @@ public class CatalogSnapshot extends AbstractRefCounted implements Writeable {
      * @throws ClassNotFoundException if a class cannot be found during deserialization
      */
     public static CatalogSnapshot readFrom(InputStream inputStream) throws IOException, ClassNotFoundException {
+        if (inputStream == null) {
+            throw new IllegalArgumentException("InputStream cannot be null for CatalogSnapshot deserialization");
+        }
+
         DataInputStream dataIn = new DataInputStream(inputStream);
 
-        // Read basic metadata
+        // Read basic metadata with validation
         long id = dataIn.readLong();
         long version = dataIn.readLong();
+
+        if (id < 0) {
+            throw new IOException("Invalid CatalogSnapshot: negative id [" + id + "]");
+        }
+        if (version < 0) {
+            throw new IOException("Invalid CatalogSnapshot: negative version [" + version + "]");
+        }
 
         // Create CatalogSnapshot instance
         CatalogSnapshot catalog = new CatalogSnapshot(null, id, version);
 
-        // Read userData map
+        // Read userData map with validation
         int userDataSize = dataIn.readInt();
+        if (userDataSize < 0) {
+            throw new IOException("Invalid CatalogSnapshot: negative userData size [" + userDataSize + "]");
+        }
+
         Map<String, String> userData = new HashMap<>();
         for (int i = 0; i < userDataSize; i++) {
             String key = dataIn.readUTF();
             String value = dataIn.readUTF();
+            if (key == null || value == null) {
+                throw new IOException("Invalid CatalogSnapshot: null key or value in userData at index [" + i + "]");
+            }
             userData.put(key, value);
         }
         catalog.userData = userData;
 
-        // Read dfGroupedSearchableFiles map
+        // Read dfGroupedSearchableFiles map with validation
         int dfGroupedSize = dataIn.readInt();
+        if (dfGroupedSize < 0) {
+            throw new IOException("Invalid CatalogSnapshot: negative dfGroupedSearchableFiles size [" + dfGroupedSize + "]");
+        }
+
         for (int i = 0; i < dfGroupedSize; i++) {
             String dataFormat = dataIn.readUTF();
+            if (dataFormat == null || dataFormat.isEmpty()) {
+                throw new IOException("Invalid CatalogSnapshot: null or empty dataFormat at index [" + i + "]");
+            }
 
             int writerFileSetsSize = dataIn.readInt();
+            if (writerFileSetsSize < 0) {
+                throw new IOException("Invalid CatalogSnapshot: negative writerFileSets size [" + writerFileSetsSize + "] for dataFormat [" + dataFormat + "]");
+            }
+
             Collection<WriterFileSet> writerFileSets = new ArrayList<>();
 
             for (int j = 0; j < writerFileSetsSize; j++) {
                 int serializedSize = dataIn.readInt();
+                if (serializedSize < 0) {
+                    throw new IOException("Invalid CatalogSnapshot: negative serialized size [" + serializedSize + "] for WriterFileSet");
+                }
+
                 byte[] serializedData = new byte[serializedSize];
                 dataIn.readFully(serializedData);
 
                 ByteArrayInputStream bais = new ByteArrayInputStream(serializedData);
                 ObjectInputStream ois = new ObjectInputStream(bais);
-                WriterFileSet writerFileSet = (WriterFileSet) ois.readObject();
-                writerFileSets.add(writerFileSet);
+                try {
+                    Object obj = ois.readObject();
+                    if (!(obj instanceof WriterFileSet)) {
+                        throw new ClassNotFoundException("Expected WriterFileSet but got " + obj.getClass().getName());
+                    }
+                    WriterFileSet writerFileSet = (WriterFileSet) obj;
+                    writerFileSets.add(writerFileSet);
+                } catch (ClassNotFoundException e) {
+                    throw new ClassNotFoundException("Failed to deserialize WriterFileSet at index [" + j + "] for dataFormat [" + dataFormat + "]", e);
+                }
             }
 
             catalog.dfGroupedSearchableFiles.put(dataFormat, writerFileSets);
+        }
+
+        // Final validation of deserialized catalog
+        if (catalog.dfGroupedSearchableFiles == null) {
+            throw new IOException("Invalid CatalogSnapshot: dfGroupedSearchableFiles is null after deserialization");
+        }
+
+        // Recalculate lastWriterGeneration for deserialized data
+        catalog.lastWriterGeneration = -1;
+        for (Collection<WriterFileSet> writerFileSets : catalog.dfGroupedSearchableFiles.values()) {
+            if (writerFileSets != null) {
+                long maxGen = writerFileSets.stream()
+                    .mapToLong(WriterFileSet::getWriterGeneration)
+                    .max()
+                    .orElse(-1);
+                if (maxGen > catalog.lastWriterGeneration) {
+                    catalog.lastWriterGeneration = maxGen;
+                }
+            }
         }
 
         return catalog;
@@ -330,7 +398,7 @@ public class CatalogSnapshot extends AbstractRefCounted implements Writeable {
      * @return a new CatalogSnapshot instance with the same data
      */
     public CatalogSnapshot clone() {
-        CatalogSnapshot cloned = new CatalogSnapshot(null, this.id, this.version);
+        CatalogSnapshot cloned = new CatalogSnapshot(new RefreshResult(), this.id, this.version);
         cloned.userData = new HashMap<>(this.userData);
 
         for (Map.Entry<String, Collection<WriterFileSet>> entry : this.dfGroupedSearchableFiles.entrySet()) {
