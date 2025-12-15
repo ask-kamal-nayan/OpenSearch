@@ -8,6 +8,8 @@
 
 package org.opensearch.datafusion.search;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.index.engine.CatalogSnapshotAwareRefreshListener;
 import org.opensearch.index.engine.EngineReaderManager;
 import org.opensearch.index.engine.exec.FileMetadata;
@@ -24,13 +26,14 @@ public class DatafusionReaderManager implements EngineReaderManager<DatafusionRe
     private DatafusionReader current;
     private String path;
     private String dataFormat;
+    private static final Logger logger = LogManager.getLogger(DatafusionReaderManager.class);
 //    private final Lock refreshLock = new ReentrantLock();
 //    private final List<ReferenceManager.RefreshListener> refreshListeners = new CopyOnWriteArrayList();
 
     public DatafusionReaderManager(String path, Collection<FileMetadata> files, String dataFormat) throws IOException {
         WriterFileSet writerFileSet = new WriterFileSet(Path.of(URI.create("file:///" + path)), 1);
         files.forEach(fileMetadata -> writerFileSet.add(fileMetadata.file()));
-        this.current = new DatafusionReader(path, List.of(writerFileSet));;
+        this.current = new DatafusionReader(path, List.of(writerFileSet));
         this.path = path;
         this.dataFormat = dataFormat;
     }
@@ -58,6 +61,7 @@ public class DatafusionReaderManager implements EngineReaderManager<DatafusionRe
 
     @Override
     public void afterRefresh(boolean didRefresh, CatalogSnapshot catalogSnapshot) throws IOException {
+        logger.info("--> AfterRefresh current files {}", current.files.stream().toList().getFirst().getFiles());
         if (didRefresh && catalogSnapshot != null) {
             DatafusionReader old = this.current;
             if(old !=null) {
