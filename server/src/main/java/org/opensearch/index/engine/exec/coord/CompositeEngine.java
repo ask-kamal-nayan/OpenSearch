@@ -148,11 +148,10 @@ public class CompositeEngine implements LifecycleAware, Closeable, Indexer, Chec
             throw new RuntimeException(e);
         }
     };
-    private static final BiConsumer<ReleasableRef<CatalogSnapshot>, CatalogSnapshotAwareRefreshListener>
+    private static final BiConsumer<Supplier<ReleasableRef<CatalogSnapshot>>, CatalogSnapshotAwareRefreshListener>
         POST_REFRESH_CATALOG_SNAPSHOT_AWARE_LISTENER_CONSUMER = (catalogSnapshot, catalogSnapshotAwareRefreshListener) -> {
         try {
-            // Wrap in Supplier as required by CatalogSnapshotAwareRefreshListener interface
-            catalogSnapshotAwareRefreshListener.afterRefresh(true, () -> catalogSnapshot);
+            catalogSnapshotAwareRefreshListener.afterRefresh(true, catalogSnapshot);
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
@@ -356,7 +355,7 @@ public class CompositeEngine implements LifecycleAware, Closeable, Indexer, Chec
 
             // Initialize checkpoint listener for tracking refreshed checkpoints
             this.lastRefreshedCheckpointListener = new LastRefreshedCheckpointListener(
-                localCheckpointTracker.getProcessedCheckpoint()
+                localCheckpointTracker
             );
 
             // Refresh here so that catalog snapshot gets initialized
@@ -404,7 +403,7 @@ public class CompositeEngine implements LifecycleAware, Closeable, Indexer, Chec
                 }
             }
             catalogSnapshotAwareRefreshListeners.forEach(refreshListener -> POST_REFRESH_CATALOG_SNAPSHOT_AWARE_LISTENER_CONSUMER.accept(
-                acquireSnapshot(),
+                this::acquireSnapshot,
                 refreshListener
             ));
             success = true;
@@ -506,8 +505,7 @@ public class CompositeEngine implements LifecycleAware, Closeable, Indexer, Chec
     public void updateSearchEngine() throws IOException {
             catalogSnapshotAwareRefreshListeners.forEach(ref -> {
             try {
-                // Wrap in Supplier as required by CatalogSnapshotAwareRefreshListener interface
-                ref.afterRefresh(true, () -> catalogSnapshotManager.acquireSnapshot());
+                ref.afterRefresh(true, catalogSnapshotManager::acquireSnapshot);
             } catch (IOException e) {
                 throw new RuntimeException(e);
             }
@@ -802,7 +800,7 @@ public class CompositeEngine implements LifecycleAware, Closeable, Indexer, Chec
             refreshed = true;
 
             catalogSnapshotAwareRefreshListeners.forEach(refreshListener -> POST_REFRESH_CATALOG_SNAPSHOT_AWARE_LISTENER_CONSUMER.accept(
-                acquireSnapshot(),
+                this::acquireSnapshot,
                 refreshListener
             ));
 
@@ -963,12 +961,12 @@ public class CompositeEngine implements LifecycleAware, Closeable, Indexer, Chec
 
     @Override
     public long lastRefreshedCheckpoint() {
-        return lastRefreshedCheckpointListener.refreshedCheckpoint.get();
+        return lastRefreshedCheckpointListener.getRefreshedCheckpoint();
     }
 
     @Override
     public long currentOngoingRefreshCheckpoint() {
-        return lastRefreshedCheckpointListener.pendingCheckpoint.get();
+        return lastRefreshedCheckpointListener.getPendingCheckpoint();
     }
 
     @Override
@@ -1380,38 +1378,38 @@ public class CompositeEngine implements LifecycleAware, Closeable, Indexer, Chec
     }
 
 
-    /**
-     * Listener that tracks the last refreshed checkpoint.
-     * This is used to determine which operations have been made searchable.
-     */
-    private final class LastRefreshedCheckpointListener implements ReferenceManager.RefreshListener {
-        final AtomicLong refreshedCheckpoint;
-        volatile AtomicLong pendingCheckpoint;
-
-        LastRefreshedCheckpointListener(long initialLocalCheckpoint) {
-            this.refreshedCheckpoint = new AtomicLong(initialLocalCheckpoint);
-            this.pendingCheckpoint = new AtomicLong(initialLocalCheckpoint);
-        }
-
-        @Override
-        public void beforeRefresh() {
-            // All changes until this point should be visible after refresh
-            pendingCheckpoint.updateAndGet(curr -> Math.max(curr, localCheckpointTracker.getProcessedCheckpoint()));
-        }
-
-        @Override
-        public void afterRefresh(boolean didRefresh) {
-            if (didRefresh) {
-                updateRefreshedCheckpoint(pendingCheckpoint.get());
-            }
-        }
-
-        void updateRefreshedCheckpoint(long checkpoint) {
-            refreshedCheckpoint.updateAndGet(curr -> Math.max(curr, checkpoint));
-            assert refreshedCheckpoint.get() >= checkpoint : refreshedCheckpoint.get() + " < " + checkpoint;
-            // This shouldn't be required ideally, but we're also invoking this method from refresh as of now.
-            // This change is added as safety check to ensure that our checkpoint values are consistent at all times.
-            pendingCheckpoint.updateAndGet(curr -> Math.max(curr, checkpoint));
-        }
-    }
+//    /**
+//     * Listener that tracks the last refreshed checkpoint.
+//     * This is used to determine which operations have been made searchable.
+//     */
+//    private final class LastRefreshedCheckpointListener implements ReferenceManager.RefreshListener {
+//        final AtomicLong refreshedCheckpoint;
+//        volatile AtomicLong pendingCheckpoint;
+//
+//        LastRefreshedCheckpointListener(long initialLocalCheckpoint) {
+//            this.refreshedCheckpoint = new AtomicLong(initialLocalCheckpoint);
+//            this.pendingCheckpoint = new AtomicLong(initialLocalCheckpoint);
+//        }
+//
+//        @Override
+//        public void beforeRefresh() {
+//            // All changes until this point should be visible after refresh
+//            pendingCheckpoint.updateAndGet(curr -> Math.max(curr, localCheckpointTracker.getProcessedCheckpoint()));
+//        }
+//
+//        @Override
+//        public void afterRefresh(boolean didRefresh) {
+//            if (didRefresh) {
+//                updateRefreshedCheckpoint(pendingCheckpoint.get());
+//            }
+//        }
+//
+//        void updateRefreshedCheckpoint(long checkpoint) {
+//            refreshedCheckpoint.updateAndGet(curr -> Math.max(curr, checkpoint));
+//            assert refreshedCheckpoint.get() >= checkpoint : refreshedCheckpoint.get() + " < " + checkpoint;
+//            // This shouldn't be required ideally, but we're also invoking this method from refresh as of now.
+//            // This change is added as safety check to ensure that our checkpoint values are consistent at all times.
+//            pendingCheckpoint.updateAndGet(curr -> Math.max(curr, checkpoint));
+//        }
+//    }
 }
