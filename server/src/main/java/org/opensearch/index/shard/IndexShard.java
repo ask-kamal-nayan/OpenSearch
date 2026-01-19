@@ -5818,12 +5818,13 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                 long checksum = Long.parseLong(uploadedSegments.get(file).getChecksum());
                 boolean fileExistsLocally;
 
+                FileMetadata fileMetadata = new FileMetadata(file);
+
                 // Fix: Use format-aware checksum for optimized indices
                 if (isOptimizedIndex() && directory instanceof CompositeStoreDirectory) {
-                    FileMetadata fileMetadata = new FileMetadata(file);
                     fileExistsLocally = localDirectoryContains((CompositeStoreDirectory) directory, fileMetadata, checksum);
                 } else {
-                    fileExistsLocally = localDirectoryContainsFile(storeDirectory, file, checksum);
+                    fileExistsLocally = localDirectoryContainsFile(storeDirectory, fileMetadata.file(), checksum);
                 }
 
                 if (overrideLocal || !fileExistsLocally) {
@@ -5917,23 +5918,21 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         for (String file : uploadedSegments.keySet()) {
             long checksum = Long.parseLong(uploadedSegments.get(file).getChecksum());
             boolean fileExistsLocally;
+            FileMetadata fileMetadata = new FileMetadata(file);
 
             // For optimized indices with multiformat support (e.g., Parquet files),
             // use format-aware checksum validation since Parquet files don't have Lucene codec footers
             if (isOptimizedIndex() && storeDirectory instanceof CompositeStoreDirectory) {
-                FileMetadata fileMetadata = new FileMetadata(file);
                 fileExistsLocally = localDirectoryContains((CompositeStoreDirectory) storeDirectory, fileMetadata, checksum);
             } else if (storeDirectory instanceof StoreRecovery.StatsDirectoryWrapper
                        && ((StoreRecovery.StatsDirectoryWrapper) storeDirectory).getDelegate() instanceof CompositeStoreDirectory) {
                 // Handle case where storeDirectory is wrapped in StatsDirectoryWrapper
-                FileMetadata fileMetadata = new FileMetadata(file);
                 fileExistsLocally = localDirectoryContains(
                     (CompositeStoreDirectory) ((StoreRecovery.StatsDirectoryWrapper) storeDirectory).getDelegate(),
                     fileMetadata, checksum);
-    } else {
-        FileMetadata fm = new FileMetadata(file);
-        fileExistsLocally = localDirectoryContainsFile(storeDirectory, fm.file(), checksum);
-    }
+            } else {
+                fileExistsLocally = localDirectoryContainsFile(storeDirectory, fileMetadata.file(), checksum);
+            }
 
             if (overrideLocal || !fileExistsLocally) {
                 toDownloadSegments.add(file);
