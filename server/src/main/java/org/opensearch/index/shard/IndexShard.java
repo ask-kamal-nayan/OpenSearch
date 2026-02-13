@@ -1012,8 +1012,16 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         // The below list of releasable ensures that if the relocation does not happen, we undo the activity of close and
         // acquire all permits. This will ensure that the remote store uploads can still be done by the existing primary shard.
         List<Releasable> releasablesOnHandoffFailures = new ArrayList<>(2);
+        logger.info("[RELOCATION] {} Starting relocation handoff to target [{}], activeOps={}, optimizedIndex={}",
+            shardId, targetAllocationId, indexShardOperationPermits.getActiveOperationsCount(), indexSettings.isOptimizedIndex());
+        final long relocateStartNanos = System.nanoTime();
         try (Releasable forceRefreshes = refreshListeners.forceRefreshes()) {
+            logger.info("[RELOCATION] {} Waiting to block all operations (timeout=30min), activeOps={}",
+                shardId, indexShardOperationPermits.getActiveOperationsCount());
             indexShardOperationPermits.blockOperations(30, TimeUnit.MINUTES, () -> {
+                final long blockAcquiredMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - relocateStartNanos);
+                logger.info("[RELOCATION] {} All operations blocked after {}ms, proceeding with handoff",
+                    shardId, blockAcquiredMs);
                 forceRefreshes.close();
 
                 boolean syncTranslog = (isRemoteTranslogEnabled() || this.isMigratingToRemote())
@@ -1031,21 +1039,28 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                         releasablesOnHandoffFailures.add(((ReleasableRetryableRefreshListener) refreshListener).drainRefreshes());
                     }
                 }
+                logger.info("[RELOCATION] {} Drained remote store refreshes", shardId);
 
                 // Ensure all in-flight remote store translog upload drains, before we perform the performSegRep.
                 releasablesOnHandoffFailures.add(getIndexer().translogManager().drainSync());
+                logger.info("[RELOCATION] {} Drained translog syncs", shardId);
 
                 // no shard operation permits are being held here, move state from started to relocated
                 assert indexShardOperationPermits.getActiveOperationsCount() == OPERATIONS_BLOCKED
                     : "in-flight operations in progress while moving shard state to relocated";
 
+                logger.info("[RELOCATION] {} Starting forceSegmentFileSync to target", shardId);
+                final long segRepStartNanos = System.nanoTime();
                 performSegRep.run();
+                logger.info("[RELOCATION] {} forceSegmentFileSync completed in {}ms", shardId,
+                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - segRepStartNanos));
 
                 /*
                  * We should not invoke the runnable under the mutex as the expected implementation is to handoff the primary context via a
                  * network operation. Doing this under the mutex can implicitly block the cluster state update thread on network operations.
                  */
                 verifyRelocatingState();
+                logger.info("[RELOCATION] {} Starting primary context handoff", shardId);
                 final ReplicationTracker.PrimaryContext primaryContext = replicationTracker.startRelocationHandoff(targetAllocationId);
                 try {
                     consumer.accept(primaryContext);
@@ -1054,6 +1069,8 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                         replicationTracker.completeRelocationHandoff(); // make changes to primaryMode and relocated flag only under
                         // mutex
                     }
+                    final long totalMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - relocateStartNanos);
+                    logger.info("[RELOCATION] {} Relocation handoff completed successfully in {}ms", shardId, totalMs);
                 } catch (final Exception e) {
                     try {
                         replicationTracker.abortRelocationHandoff();
@@ -1064,12 +1081,16 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                 }
             });
         } catch (TimeoutException e) {
-            logger.warn("timed out waiting for relocation hand-off to complete");
+            final long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - relocateStartNanos);
+            logger.warn("[RELOCATION] {} TIMED OUT waiting for relocation hand-off after {}ms, activeOps={}",
+                shardId, elapsedMs, indexShardOperationPermits.getActiveOperationsCount());
             // This is really bad as ongoing replication operations are preventing this shard from completing relocation hand-off.
             // Fail primary relocation source and target shards.
             failShard("timed out waiting for relocation hand-off to complete", null);
             throw new IndexShardClosedException(shardId(), "timed out waiting for relocation hand-off to complete");
         } catch (Exception ex) {
+            final long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - relocateStartNanos);
+            logger.warn("[RELOCATION] {} Relocation handoff FAILED after {}ms: {}", shardId, elapsedMs, ex.getMessage());
             assert replicationTracker.isPrimaryMode();
             // If the primary mode is still true after the end of handoff attempt, it basically means that the relocation
             // failed. The existing primary will continue to be the primary, so we need to allow the segments and translog
@@ -3120,12 +3141,15 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     }
 
     void openEngineAndSkipTranslogRecovery(boolean syncFromRemote) throws IOException {
+        logger.info("[PEER_RECOVERY] {} openEngineAndSkipTranslogRecovery called, syncFromRemote={}, optimizedIndex={}, primary={}",
+            shardId, syncFromRemote, indexSettings.isOptimizedIndex(), shardRouting.primary());
         recoveryState.validateCurrentStage(RecoveryState.Stage.TRANSLOG);
         loadGlobalCheckpointToReplicationTracker();
         innerOpenEngineAndTranslog(replicationTracker, syncFromRemote);
         assert routingEntry().isSearchOnly() == false || translogStats().estimatedNumberOfOperations() == 0
             : "Translog is expected to be empty but holds " + translogStats().estimatedNumberOfOperations() + "Operations.";
         getIndexer().translogManager().skipTranslogRecovery();
+        logger.info("[PEER_RECOVERY] {} Engine opened and translog recovery skipped", shardId);
     }
 
     private void innerOpenEngineAndTranslog(LongSupplier globalCheckpointSupplier) throws IOException {
@@ -5600,6 +5624,8 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         assert getActiveOperationsCount() == OPERATIONS_BLOCKED : "resetting engine without blocking operations; active operations are ["
             + getActiveOperations()
             + ']';
+        logger.info("[RESET_ENGINE] {} Starting resetEngineToGlobalCheckpoint, optimizedIndex={}", shardId, indexSettings.isOptimizedIndex());
+        final long resetStartNanos = System.nanoTime();
         sync(); // persist the global checkpoint to disk
         final SeqNoStats seqNoStats = seqNoStats();
         final TranslogStats translogStats = translogStats();
@@ -5685,6 +5711,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         CompositeEngine newCompositeEngine;
         CompositeEngine oldCompositeEngine;
         if (indexSettings.isOptimizedIndex()) {
+            logger.info("[RESET_ENGINE] {} Creating new CompositeEngine (deleteUnreferencedFiles=false)", shardId);
             // Create NEW CompositeEngine OUTSIDE synchronized block with fresh translog
             newCompositeEngine = new CompositeEngine(
                 newEngineConfig(replicationTracker),
@@ -5697,6 +5724,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                 false
             );
             oldCompositeEngine = currentCompositeEngineReference.getAndSet(newCompositeEngine);
+            logger.info("[RESET_ENGINE] {} CompositeEngine created, starting translog recovery (recoverUpto={})", shardId, recoverUpto);
 
             final TranslogRecoveryRunner translogRunner = (snapshot) -> runTranslogRecovery(
                 newCompositeEngine,
@@ -5711,7 +5739,10 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             newCompositeEngine
                 .translogManager()
                 .recoverFromTranslog(translogRunner, newCompositeEngine.getProcessedLocalCheckpoint(), recoverUpto);
+            logger.info("[RESET_ENGINE] {} Translog recovery complete, calling refresh('reset_engine')", shardId);
             newCompositeEngine.refresh("reset_engine");
+            logger.info("[RESET_ENGINE] {} refresh('reset_engine') complete, totalTime={}ms",
+                shardId, TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - resetStartNanos));
         } else {
             newCompositeEngine = null;
             oldCompositeEngine = null;

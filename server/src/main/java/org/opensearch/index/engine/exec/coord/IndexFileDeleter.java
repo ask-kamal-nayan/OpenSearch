@@ -8,9 +8,10 @@
 
 package org.opensearch.index.engine.exec.coord;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.index.engine.exec.WriterFileSet;
-import org.opensearch.index.engine.exec.composite.CompositeIndexingExecutionEngine;
 import org.opensearch.index.shard.ShardPath;
 
 import java.io.IOException;
@@ -20,11 +21,12 @@ import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
 
 @ExperimentalApi
 public class IndexFileDeleter {
+
+    private static final Logger logger = LogManager.getLogger(IndexFileDeleter.class);
 
     private final Map<String,Map<String, AtomicInteger>> fileRefCounts = new ConcurrentHashMap<>();
     private final CompositeEngine compositeEngine;
@@ -39,6 +41,9 @@ public class IndexFileDeleter {
             addFileReferences(initialCatalogSnapshot);
             if (deleteUnreferenced) {
                 deleteUnreferencedFiles(shardPath);
+            } else {
+                logger.info("[INDEX_FILE_DELETER] Skipping deleteUnreferencedFiles (deleteUnreferenced=false), shardPath={}",
+                    shardPath.getDataPath());
             }
         }
     }
@@ -77,7 +82,7 @@ public class IndexFileDeleter {
         }
 
         if (!dfFilesToDelete.isEmpty()) {
-            System.out.println("Files to delete : " + dfFilesToDelete);
+            logger.info("[INDEX_FILE_DELETER] removeFileReferences: filesToDelete={}", dfFilesToDelete);
             deleteUnreferencedFiles(dfFilesToDelete);
         }
     }
@@ -120,6 +125,8 @@ public class IndexFileDeleter {
             if (!filesToDelete.isEmpty()) {
                 dfFilesToDelete.put(dataFormat, filesToDelete);
             }
+            logger.info("[INDEX_FILE_DELETER] deleteUnreferencedFiles: format={}, referenced={}, toDelete={}, path={}",
+                dataFormat, referencedFiles.size(), filesToDelete.size(), dataFormatPath);
         }
         deleteUnreferencedFiles(dfFilesToDelete);
     }
@@ -128,9 +135,10 @@ public class IndexFileDeleter {
         try {
             if (dfFilesToDelete.isEmpty())
                 return;
+            logger.info("[INDEX_FILE_DELETER] Deleting unreferenced files: {}", dfFilesToDelete);
             compositeEngine.notifyDelete(dfFilesToDelete);
         } catch (Exception e) {
-            System.err.println("Failed to delete unreferenced files: " + dfFilesToDelete + ", error: " + e.getMessage());
+            logger.warn("[INDEX_FILE_DELETER] Failed to delete unreferenced files: {}, error: {}", dfFilesToDelete, e.getMessage());
         }
     }
 

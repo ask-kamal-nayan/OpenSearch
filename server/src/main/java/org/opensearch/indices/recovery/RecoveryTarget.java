@@ -212,6 +212,8 @@ public class RecoveryTarget extends ReplicationTarget implements RecoveryTargetH
     @Override
     public void prepareForTranslogOperations(int totalTranslogOps, ActionListener<Void> listener) {
         ActionListener.completeWith(listener, () -> {
+            logger.info("[PEER_RECOVERY] {} prepareForTranslogOperations called, totalTranslogOps={}, optimizedIndex={}",
+                indexShard.shardId(), totalTranslogOps, indexShard.indexSettings().isOptimizedIndex());
             state().getIndex().setFileDetailsComplete(); // ops-based recoveries don't send the file details
             state().getTranslog().totalOperations(totalTranslogOps);
             // Cleanup remote contents before opening new translog.
@@ -230,6 +232,7 @@ public class RecoveryTarget extends ReplicationTarget implements RecoveryTargetH
                 indexShard.waitForRemoteStoreSync(this::setLastAccessTime);
                 logger.info("Remote Store is now seeded for {}", indexShard.shardId());
             }
+            logger.info("[PEER_RECOVERY] {} prepareForTranslogOperations completed", indexShard.shardId());
             return null;
         });
     }
@@ -242,6 +245,8 @@ public class RecoveryTarget extends ReplicationTarget implements RecoveryTargetH
     @Override
     public void finalizeRecovery(final long globalCheckpoint, final long trimAboveSeqNo, ActionListener<Void> listener) {
         ActionListener.completeWith(listener, () -> {
+            logger.info("[PEER_RECOVERY] {} finalizeRecovery called, globalCheckpoint={}, trimAboveSeqNo={}",
+                indexShard.shardId(), globalCheckpoint, trimAboveSeqNo);
             indexShard.updateGlobalCheckpointOnReplica(globalCheckpoint, "finalizing recovery");
             // Persist the global checkpoint.
             indexShard.sync();
@@ -261,6 +266,7 @@ public class RecoveryTarget extends ReplicationTarget implements RecoveryTargetH
                 indexShard.flush(new FlushRequest().force(true).waitIfOngoing(true));
             }
             indexShard.finalizeRecovery();
+            logger.info("[PEER_RECOVERY] {} finalizeRecovery completed, shardState={}", indexShard.shardId(), indexShard.state());
             return null;
         });
     }

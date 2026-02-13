@@ -587,8 +587,14 @@ public class SegmentReplicationTargetService extends AbstractLifecycleComponent 
         final IndexShard indexShard = indicesService.getShardOrNull(shardId);
         // Proceed with round of segment replication only when it is allowed
         if (indexShard == null || indexShard.getReplicationEngine().isEmpty()) {
+            logger.info("[FORCE_SYNC] {} Skipping force sync - indexShard={}, replicationEngine={}",
+                shardId, indexShard != null ? "present" : "null",
+                indexShard != null ? (indexShard.getReplicationEngine().isEmpty() ? "empty" : "present") : "N/A");
             listener.onResponse(TransportResponse.Empty.INSTANCE);
         } else {
+            logger.info("[FORCE_SYNC] {} Starting force segment replication, checkpoint={}",
+                shardId, indexShard.getLatestReplicationCheckpoint());
+            final long forceSyncStartNanos = System.nanoTime();
             // We are skipping any validation for an incoming checkpoint, use the shard's latest checkpoint in the target.
             startReplication(
                 indexShard,
@@ -597,25 +603,22 @@ public class SegmentReplicationTargetService extends AbstractLifecycleComponent 
                     @Override
                     public void onReplicationDone(SegmentReplicationState state) {
                         try {
-                            logger.trace(
-                                () -> new ParameterizedMessage(
-                                    "[shardId {}] [replication id {}] Force replication Sync complete to {}, timing data: {}",
-                                    shardId,
-                                    state.getReplicationId(),
-                                    indexShard.getLatestReplicationCheckpoint(),
-                                    state.getTimingData()
-                                )
-                            );
+                            final long replicationMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
+                                System.nanoTime() - forceSyncStartNanos);
+                            logger.info("[FORCE_SYNC] {} Replication done in {}ms, isPrimary={}, calling resetToWriteableEngine",
+                                shardId, replicationMs, indexShard.recoveryState().getPrimary());
                             // Promote engine type for primary target
                             if (indexShard.recoveryState().getPrimary() == true) {
                                 indexShard.resetToWriteableEngine();
+                                logger.info("[FORCE_SYNC] {} resetToWriteableEngine completed", shardId);
                             } else {
                                 // Update the replica's checkpoint on primary's replication tracker.
                                 updateVisibleCheckpoint(state.getReplicationId(), indexShard);
                             }
                             listener.onResponse(TransportResponse.Empty.INSTANCE);
                         } catch (Exception e) {
-                            logger.error("Error while marking replication completed", e);
+                            logger.error("[FORCE_SYNC] {} Error during post-replication engine reset: {}",
+                                shardId, e.getMessage(), e);
                             listener.onFailure(e);
                         }
                     }
@@ -626,6 +629,10 @@ public class SegmentReplicationTargetService extends AbstractLifecycleComponent 
                         ReplicationFailedException e,
                         boolean sendShardFailure
                     ) {
+                        final long replicationMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
+                            System.nanoTime() - forceSyncStartNanos);
+                        logger.warn("[FORCE_SYNC] {} Replication FAILED after {}ms, sendShardFailure={}: {}",
+                            shardId, replicationMs, sendShardFailure, e.getMessage());
                         logReplicationFailure(state, e, indexShard);
                         if (sendShardFailure) {
                             failShard(e, indexShard);
