@@ -11,6 +11,9 @@ package org.opensearch.index.engine.exec;
 import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.common.util.concurrent.AbstractRefCounted;
 import org.opensearch.index.engine.dataformat.DataFormat;
+import org.opensearch.core.common.io.stream.StreamInput;
+import org.opensearch.core.common.io.stream.StreamOutput;
+import org.opensearch.core.common.io.stream.Writeable;
 
 import java.io.IOException;
 import java.util.Collection;
@@ -25,7 +28,7 @@ import java.util.Set;
  * Subclasses must implement methods for accessing file metadata, segments, and user data.
  */
 @ExperimentalApi
-public abstract class CatalogSnapshot extends AbstractRefCounted {
+public abstract class CatalogSnapshot extends AbstractRefCounted implements Writeable, Cloneable {
 
     /**
      * Key for storing catalog snapshot in user data.
@@ -47,6 +50,18 @@ public abstract class CatalogSnapshot extends AbstractRefCounted {
         super(name);
         this.generation = generation;
         this.version = version;
+    }
+
+    public CatalogSnapshot(StreamInput in) throws IOException {
+        super("catalog_snapshot");
+        this.generation = in.readLong();
+        this.version = in.readLong();
+    }
+
+    @Override
+    public void writeTo(StreamOutput out) throws IOException {
+        out.writeLong(generation);
+        out.writeLong(version);
     }
 
     public long getGeneration() {

@@ -9,15 +9,17 @@
 package org.opensearch.index.engine.exec;
 
 import org.opensearch.common.annotation.ExperimentalApi;
+import org.opensearch.core.common.io.stream.StreamInput;
+import org.opensearch.core.common.io.stream.StreamOutput;
+import org.opensearch.core.common.io.stream.Writeable;
 import org.opensearch.index.engine.dataformat.DataFormat;
 
+import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
 
 /**
  * Represents a segment in the catalog snapshot containing files grouped by data format.
- * Each segment has a unique generation number and maintains searchable files organized by their data format type.
- * This class is serializable and can be transmitted across nodes for replication and recovery operations.
  */
 @ExperimentalApi
 public record Segment(long generation, Map<String, WriterFileSet> dfGroupedSearchableFiles) {
@@ -28,6 +30,9 @@ public record Segment(long generation, Map<String, WriterFileSet> dfGroupedSearc
 
     public static Builder builder(long generation) {
         return new Builder(generation);
+    }
+
+    public void writeTo(StreamOutput out) {
     }
 
     /**
