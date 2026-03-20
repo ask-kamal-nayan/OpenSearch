@@ -181,6 +181,7 @@ import org.opensearch.index.seqno.SequenceNumbers;
 import org.opensearch.index.shard.PrimaryReplicaSyncer.ResyncTask;
 import org.opensearch.index.similarity.SimilarityService;
 import org.opensearch.index.store.RemoteSegmentStoreDirectory;
+import org.opensearch.index.store.UploadedSegmentMetadata;
 import org.opensearch.index.store.RemoteStoreFileDownloader;
 import org.opensearch.index.store.Store;
 import org.opensearch.index.store.Store.MetadataSnapshot;
@@ -5563,7 +5564,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         // are uploaded to the remote segment store.
         RemoteSegmentMetadata remoteSegmentMetadata = remoteDirectory.init();
 
-        Map<String, RemoteSegmentStoreDirectory.UploadedSegmentMetadata> uploadedSegments = remoteDirectory
+        Map<String, UploadedSegmentMetadata> uploadedSegments = remoteDirectory
             .getSegmentsUploadedToRemoteStore()
             .entrySet()
             .stream()
@@ -5640,7 +5641,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             remoteDirectory.init();
             remoteStore.incRef();
         }
-        Map<String, RemoteSegmentStoreDirectory.UploadedSegmentMetadata> uploadedSegments = sourceRemoteDirectory
+        Map<String, UploadedSegmentMetadata> uploadedSegments = sourceRemoteDirectory
             .getSegmentsUploadedToRemoteStore();
         store.incRef();
         try {
@@ -5714,7 +5715,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         Directory storeDirectory,
         RemoteSegmentStoreDirectory sourceRemoteDirectory,
         RemoteSegmentStoreDirectory targetRemoteDirectory,
-        Map<String, RemoteSegmentStoreDirectory.UploadedSegmentMetadata> uploadedSegments,
+        Map<String, UploadedSegmentMetadata> uploadedSegments,
         boolean overrideLocal,
         final Runnable onFileSync
     ) throws IOException {
