@@ -897,7 +897,8 @@ public final class IndexModule {
                 segmentReplicationStatsProvider,
                 clusterDefaultMaxMergeAtOnceSupplier,
                 clusterMergeSchedulerConfig,
-                dataFormatAwareEngineFactorySupplier
+                dataFormatAwareEngineFactorySupplier,
+                compositeStoreDirectoryFactory
             );
             success = true;
             return indexService;

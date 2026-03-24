@@ -786,14 +786,16 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
             } else {
                 directory = directoryFactory.newDirectory(this.indexSettings, path);
             }
-            store = storeFactory.newStore(
+            CompositeStoreDirectory compositeStoreDir = createCompositeStoreDirectory(shardId, path);
+            store = new Store(
                 shardId,
                 this.indexSettings,
                 directory,
                 lock,
                 new StoreCloseListener(shardId, () -> eventListener.onStoreClosed(shardId)),
                 path,
-                directoryFactory
+                directoryFactory,
+                compositeStoreDir
             );
             eventListener.onStoreCreated(shardId);
             DataFormatAwareEngineFactory dataFormatAwareEngineFactory = dataFormatAwareEngineFactorySupplier != null
