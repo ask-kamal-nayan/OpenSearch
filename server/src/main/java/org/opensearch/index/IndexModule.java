@@ -83,6 +83,7 @@ import org.opensearch.index.shard.IndexingOperationListener;
 import org.opensearch.index.shard.SearchOperationListener;
 import org.opensearch.index.shard.ShardPath;
 import org.opensearch.index.similarity.SimilarityService;
+import org.opensearch.index.store.CompositeStoreDirectoryFactory;
 import org.opensearch.index.store.DefaultCompositeDirectoryFactory;
 import org.opensearch.index.store.FsDirectoryFactory;
 import org.opensearch.index.store.Store;
@@ -273,6 +274,7 @@ public final class IndexModule {
     private final Map<String, TriFunction<Settings, Version, ScriptService, Similarity>> similarities = new HashMap<>();
     private final Map<String, IndexStorePlugin.DirectoryFactory> directoryFactories;
     private final Map<String, IndexStorePlugin.CompositeDirectoryFactory> compositeDirectoryFactories;
+    private final Map<String, CompositeStoreDirectoryFactory> compositeStoreDirectoryFactories;
     private final SetOnce<BiFunction<IndexSettings, IndicesQueryCache, QueryCache>> forceQueryCacheProvider = new SetOnce<>();
     private final List<SearchOperationListener> searchOperationListeners = new ArrayList<>();
     private final List<IndexingOperationListener> indexOperationListeners = new ArrayList<>();
@@ -306,7 +308,8 @@ public final class IndexModule {
         final Map<String, IndexStorePlugin.RecoveryStateFactory> recoveryStateFactories,
         final Map<String, IndexStorePlugin.StoreFactory> storeFactories,
         final FileCache fileCache,
-        final CompositeIndexSettings compositeIndexSettings
+        final CompositeIndexSettings compositeIndexSettings,
+        final Map<String, CompositeStoreDirectoryFactory> compositeStoreDirectoryFactories
     ) {
         this.indexSettings = indexSettings;
         this.analysisRegistry = analysisRegistry;
@@ -316,6 +319,7 @@ public final class IndexModule {
         this.indexOperationListeners.add(new IndexingSlowLog(indexSettings));
         this.directoryFactories = Collections.unmodifiableMap(directoryFactories);
         this.compositeDirectoryFactories = Collections.unmodifiableMap(compositeDirectoryFactories);
+        this.compositeStoreDirectoryFactories = Collections.unmodifiableMap(compositeStoreDirectoryFactories);
         this.allowExpensiveQueries = allowExpensiveQueries;
         this.expressionResolver = expressionResolver;
         this.recoveryStateFactories = recoveryStateFactories;
@@ -347,7 +351,8 @@ public final class IndexModule {
             recoveryStateFactories,
             Collections.emptyMap(),
             null,
-            null
+            null,
+            Collections.emptyMap()
         );
     }
 
@@ -825,6 +830,10 @@ public final class IndexModule {
             indexSettings,
             compositeDirectoryFactories
         );
+        final CompositeStoreDirectoryFactory compositeStoreDirectoryFactory = getCompositeStoreDirectoryFactory(
+            indexSettings,
+            compositeStoreDirectoryFactories
+        );
         final IndexStorePlugin.RecoveryStateFactory recoveryStateFactory = getRecoveryStateFactory(indexSettings, recoveryStateFactories);
         QueryCache queryCache = null;
         IndexAnalyzers indexAnalyzers = null;
@@ -956,6 +965,16 @@ public final class IndexModule {
             }
         }
         return factory;
+    }
+
+    private static CompositeStoreDirectoryFactory getCompositeStoreDirectoryFactory(
+        final IndexSettings indexSettings,
+        final Map<String, CompositeStoreDirectoryFactory> compositeStoreDirectoryFactories
+    ) {
+        if (compositeStoreDirectoryFactories.isEmpty()) {
+            return null;
+        }
+        return compositeStoreDirectoryFactories.get("default");
     }
 
     private static IndexStorePlugin.RecoveryStateFactory getRecoveryStateFactory(

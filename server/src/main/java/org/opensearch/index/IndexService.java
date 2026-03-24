@@ -97,6 +97,8 @@ import org.opensearch.index.shard.ShardNotFoundException;
 import org.opensearch.index.shard.ShardNotInPrimaryModeException;
 import org.opensearch.index.shard.ShardPath;
 import org.opensearch.index.similarity.SimilarityService;
+import org.opensearch.index.store.CompositeStoreDirectory;
+import org.opensearch.index.store.CompositeStoreDirectoryFactory;
 import org.opensearch.index.store.RemoteSegmentStoreDirectoryFactory;
 import org.opensearch.index.store.Store;
 import org.opensearch.index.store.remote.filecache.FileCache;
@@ -160,6 +162,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
     private final ShardStoreDeleter shardStoreDeleter;
     private final IndexStorePlugin.DirectoryFactory directoryFactory;
     private final IndexStorePlugin.CompositeDirectoryFactory compositeDirectoryFactory;
+    private final CompositeStoreDirectoryFactory compositeStoreDirectoryFactory;
     private final IndexStorePlugin.DirectoryFactory remoteDirectoryFactory;
     private final IndexStorePlugin.RecoveryStateFactory recoveryStateFactory;
     private final CheckedFunction<DirectoryReader, DirectoryReader, IOException> readerWrapper;
@@ -269,7 +272,8 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
             MapperService,
             IndexSettings,
             DataFormatAwareEngineFactory,
-            IOException> dataFormatAwareEngineFactorySupplier
+            IOException> dataFormatAwareEngineFactorySupplier,
+        CompositeStoreDirectoryFactory compositeStoreDirectoryFactory
     ) {
         super(indexSettings);
         this.storeFactory = storeFactory;
@@ -338,6 +342,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         this.nodeEnv = nodeEnv;
         this.directoryFactory = directoryFactory;
         this.compositeDirectoryFactory = compositeDirectoryFactory;
+        this.compositeStoreDirectoryFactory = compositeStoreDirectoryFactory;
         this.remoteDirectoryFactory = remoteDirectoryFactory;
         this.recoveryStateFactory = recoveryStateFactory;
         this.engineFactory = Objects.requireNonNull(engineFactory);
@@ -1332,6 +1337,24 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
             }
         });
         rescheduleRefreshTasks();
+    }
+
+    /**
+     * Creates CompositeStoreDirectory using the factory if available, otherwise fallback to Store's internal creation.
+     * This method centralizes the directory creation logic and enables plugin-based format discovery.
+     */
+    private CompositeStoreDirectory createCompositeStoreDirectory(ShardId shardId, ShardPath shardPath) throws IOException {
+        if (compositeStoreDirectoryFactory != null) {
+            logger.debug("Using CompositeStoreDirectoryFactory to create directory for shard path: {}", shardPath);
+            return compositeStoreDirectoryFactory.newCompositeStoreDirectory(
+                indexSettings,
+                shardId,
+                shardPath
+            );
+        }
+
+        logger.debug("No CompositeStoreDirectoryFactory available, Store will handle internal creation for: {}", shardPath);
+        return null;
     }
 
     private void updateFsyncTaskIfNecessary() {
