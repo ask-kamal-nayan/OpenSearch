@@ -6,7 +6,7 @@
  * compatible open source license.
  */
 
-package org.opensearch.index.engine.exec.coord;
+package org.opensearch.index.engine.exec;
 
 import org.apache.lucene.index.SegmentInfos;
 import org.apache.lucene.store.BufferedChecksumIndexInput;
@@ -26,6 +26,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+/**
+ * A {@link CatalogSnapshot} implementation backed by Lucene's {@link SegmentInfos}.
+ * This is used for traditional Lucene-based segment tracking in remote store operations.
+ *
+ * @opensearch.internal
+ */
 public class SegmentInfosCatalogSnapshot extends CatalogSnapshot {
 
     private static final String CATALOG_SNAPSHOT_KEY = "_segment_infos_catalog_snapshot_";
@@ -112,8 +118,7 @@ public class SegmentInfosCatalogSnapshot extends CatalogSnapshot {
     }
 
     @Override
-    public  void setUserData(Map<String, String> userData, boolean b)
-    {
+    public void setUserData(Map<String, String> userData, boolean b) {
         // TODO no op since SegmentInfosCatalogSnapshot is not refcounted
     }
 

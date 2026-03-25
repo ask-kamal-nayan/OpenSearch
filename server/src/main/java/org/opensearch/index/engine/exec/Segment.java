@@ -20,6 +20,8 @@ import java.util.Map;
 
 /**
  * Represents a segment in the catalog snapshot containing files grouped by data format.
+ * Each segment has a unique generation number and maintains searchable files organized by their data format type.
+ * This class is serializable and can be transmitted across nodes for replication and recovery operations.
  */
 @ExperimentalApi
 public record Segment(long generation, Map<String, WriterFileSet> dfGroupedSearchableFiles) {
