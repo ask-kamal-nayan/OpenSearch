@@ -17,7 +17,7 @@ import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.exec.FileMetadata;
 import org.opensearch.index.shard.IndexShard;
 import org.opensearch.index.store.RemoteSegmentStoreDirectory;
-import org.opensearch.index.store.UploadedSegmentMetadata;
+import org.opensearch.index.store.RemoteSegmentStoreDirectory.UploadedSegmentMetadata;
 import org.opensearch.index.store.remote.metadata.RemoteSegmentMetadata;
 import org.opensearch.indices.replication.common.ReplicationType;
 import org.opensearch.plugins.Plugin;
@@ -294,7 +294,7 @@ public class ParquetSegmentReplicationIT extends RemoteStoreBaseIntegTestCase {
                 assertNotNull("FileMetadata should have format", fileMetadata.dataFormat());
                 assertEquals("Format should match in uploaded metadata",
                     fileMetadata.dataFormat(),
-                    replicaMetadataMap.get(file).getDataFormat()
+                    replicaMetadataMap.get(file).getOriginalFilename()
                 );
             }
 

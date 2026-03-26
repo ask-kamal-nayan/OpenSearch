@@ -74,7 +74,7 @@ public class RemoteDirectory extends Directory {
      * Map containing the mapping of segment files that are pending download as part of the pre-copy (warm) phase of
      * {@link org.opensearch.index.engine.MergedSegmentWarmer}. The key is the local filename and value is the remote filename.
      */
-    final Map<String, String> pendingDownloadMergedSegments;
+    protected final Map<String, String> pendingDownloadMergedSegments;
 
     /**
      * Number of bytes in the segment file to store checksum
@@ -184,8 +184,49 @@ public class RemoteDirectory extends Directory {
         blobContainer.deleteBlobsIgnoringIfNotExists(Collections.singletonList(name));
     }
 
-    public void deleteFile(UploadedSegmentMetadata uploadedSegmentMetadata) throws IOException {
+    /**
+     * Removes multiple existing files in the directory in a batch operation.
+     *
+     * <p>This method will not throw an exception when a file doesn't exist and simply ignores missing files.
+     * This is consistent with the behavior of {@link #deleteFile(String)}.
+     *
+     * @param names the collection of filenames to delete.
+     * @throws IOException if the files exist but could not be deleted.
+     */
+    public void deleteFiles(List<String> names) throws IOException {
+        if (names == null || names.isEmpty()) {
+            return;
+        }
+        blobContainer.deleteBlobsIgnoringIfNotExists(names);
+    }
+
+    /**
+     * Deletes a file using UploadedSegmentMetadata.
+     * Default implementation delegates to deleteFile(String) using the uploaded filename.
+     * CompositeRemoteDirectory overrides this for format-aware routing.
+     *
+     * @param uploadedSegmentMetadata the metadata of the uploaded segment
+     * @throws IOException if the file exists but could not be deleted
+     */
+    public void deleteFile(RemoteSegmentStoreDirectory.UploadedSegmentMetadata uploadedSegmentMetadata) throws IOException {
         deleteFile(uploadedSegmentMetadata.getUploadedFilename());
+    }
+
+    /**
+     * Opens a stream for reading an existing file using UploadedSegmentMetadata.
+     * Default implementation delegates to openInput(String, long, IOContext) using the uploaded filename.
+     * CompositeRemoteDirectory overrides this for format-aware routing, extracting the data format
+     * from originalFilename to determine which BlobContainer to read from.
+     *
+     * @param metadata   the uploaded segment metadata containing original and uploaded filenames
+     * @param fileLength the length of the file
+     * @param context    desired {@link IOContext} context
+     * @return the {@link IndexInput} for reading the file
+     * @throws IOException in case of I/O error
+     */
+    public IndexInput openInput(RemoteSegmentStoreDirectory.UploadedSegmentMetadata metadata, long fileLength, IOContext context)
+        throws IOException {
+        return openInput(metadata.getUploadedFilename(), fileLength, context);
     }
 
     /**

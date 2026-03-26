@@ -247,9 +247,11 @@ public final class RemoteStoreFileDownloader {
                 logger.trace("Downloading format-aware file {} with format {}", fileMetadata.file(), fileMetadata.dataFormat());
                 try {
                     cancellableThreads.executeIO(() -> {
-//                        String fileName = fileMetadata.serialize();
-                        // Use format-aware copy - CompositeStoreDirectoryStatsWrapper will route based on format
-                        destination.copyFrom(source, fileMetadata.serialize(), fileMetadata.file(), IOContext.DEFAULT);
+                        // Use format-aware copy: src and dest both use serialized form (e.g. "_0.parquet:::parquet")
+                        // so that the ReplicationStatsDirectoryWrapper progress tracker matches the name
+                        // registered in addFileDetail(). CompositeStoreDirectory.parseFilePath() handles
+                        // the ":::" parsing to route to the correct local subdirectory.
+                        destination.copyFrom(source, fileMetadata.serialize(), fileMetadata.serialize(), IOContext.DEFAULT);
                         logger.trace("Downloaded format-aware file {} of format {}",
                                    fileMetadata.file(), fileMetadata.dataFormat());
                         onFileCompletion.run();

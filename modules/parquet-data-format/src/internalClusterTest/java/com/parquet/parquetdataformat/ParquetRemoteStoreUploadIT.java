@@ -17,7 +17,7 @@ import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.exec.FileMetadata;
 import org.opensearch.index.shard.IndexShard;
 import org.opensearch.index.store.RemoteSegmentStoreDirectory;
-import org.opensearch.index.store.UploadedSegmentMetadata;
+import org.opensearch.index.store.RemoteSegmentStoreDirectory.UploadedSegmentMetadata;
 import org.opensearch.index.store.remote.metadata.RemoteSegmentMetadata;
 import org.opensearch.indices.RemoteStoreSettings;
 import org.opensearch.plugins.Plugin;
@@ -361,7 +361,7 @@ public class ParquetRemoteStoreUploadIT extends RemoteStoreBaseIntegTestCase {
 
                 UploadedSegmentMetadata uploadedMeta = metadataMap.get(file);
                 assertEquals("UploadedSegmentMetadata format should match FileMetadata",
-                    fileMetadata.dataFormat(), uploadedMeta.getDataFormat());
+                    fileMetadata.dataFormat(), uploadedMeta.getUploadedFilename());
 
                 logger.debug("--> File: {}, Format: {}, RemoteFile: {}",
                     fileMetadata.file(), fileMetadata.dataFormat(), uploadedMeta.getUploadedFilename());

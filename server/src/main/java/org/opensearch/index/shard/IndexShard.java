@@ -191,7 +191,6 @@ import org.opensearch.index.store.Store;
 import org.opensearch.index.store.Store.MetadataSnapshot;
 import org.opensearch.index.store.StoreFileMetadata;
 import org.opensearch.index.store.StoreStats;
-import org.opensearch.index.store.UploadedSegmentMetadata;
 import org.opensearch.index.store.remote.metadata.RemoteSegmentMetadata;
 import org.opensearch.index.translog.RemoteBlobStoreInternalTranslogFactory;
 import org.opensearch.index.translog.RemoteFsTranslog;
@@ -5865,9 +5864,9 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         // are uploaded to the remote segment store.
         RemoteSegmentMetadata remoteSegmentMetadata = remoteDirectory.init();
 
-        Map<String, UploadedSegmentMetadata> uploadedSegments = remoteDirectory.getSegmentsUploadedToRemoteStore();
-        Map<String, UploadedSegmentMetadata> filteredSegments = new HashMap<>();
-        for (Map.Entry<String, UploadedSegmentMetadata> entry : uploadedSegments.entrySet()) {
+        Map<String, RemoteSegmentStoreDirectory.UploadedSegmentMetadata> uploadedSegments = remoteDirectory.getSegmentsUploadedToRemoteStore();
+        Map<String, RemoteSegmentStoreDirectory.UploadedSegmentMetadata> filteredSegments = new HashMap<>();
+        for (Map.Entry<String, RemoteSegmentStoreDirectory.UploadedSegmentMetadata> entry : uploadedSegments.entrySet()) {
             if (!entry.getKey().startsWith(IndexFileNames.SEGMENTS)) {
                 filteredSegments.put(entry.getKey(), entry.getValue());
             }
@@ -5959,7 +5958,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             remoteDirectory.init();
             remoteStore.incRef();
         }
-        Map<String, UploadedSegmentMetadata> uploadedSegments = sourceRemoteDirectory
+        Map<String, RemoteSegmentStoreDirectory.UploadedSegmentMetadata> uploadedSegments = sourceRemoteDirectory
             .getSegmentsUploadedToRemoteStore();
         store.incRef();
         try {
@@ -6055,7 +6054,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         Directory storeDirectory,
         RemoteSegmentStoreDirectory sourceRemoteDirectory,
         RemoteSegmentStoreDirectory targetRemoteDirectory,
-        Map<String, UploadedSegmentMetadata> uploadedSegments,
+        Map<String, RemoteSegmentStoreDirectory.UploadedSegmentMetadata> uploadedSegments,
         boolean overrideLocal,
         final Runnable onFileSync
     )  throws IOException {

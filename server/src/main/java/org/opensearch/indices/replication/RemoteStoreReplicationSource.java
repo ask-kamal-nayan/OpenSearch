@@ -147,10 +147,11 @@ public class RemoteStoreReplicationSource implements SegmentReplicationSource {
 
                 for (StoreFileMetadata storeFileMetadata : filesToFetch) {
                     String fileName = storeFileMetadata.name();
-                    String dataFormat = storeFileMetadata.dataFormat() != null ? storeFileMetadata.dataFormat() : "lucene";
 
-                    // Create FileMetadata for format-aware operations
-                    FileMetadata fileMetadata = new FileMetadata(dataFormat, fileName);
+                    // Use single-arg constructor to parse format from the ":::format" suffix in the name.
+                    // The name already contains the format suffix (e.g., "_0.parquet:::parquet"),
+                    // so using the 2-arg constructor would double-append it.
+                    FileMetadata fileMetadata = new FileMetadata(fileName);
 
                     // Verify file doesn't already exist in local directory
                     if (directoryFiles.contains(fileMetadata)) {
@@ -162,13 +163,11 @@ public class RemoteStoreReplicationSource implements SegmentReplicationSource {
 
                     toDownloadFileMetadata.add(fileMetadata);
 
-                    logger.trace("Queuing format-aware file for download: {} with format: {}", fileName, dataFormat);
+                    logger.trace("Queuing format-aware file for download: {} with format: {}", fileName, fileMetadata.dataFormat());
                 }
 
                 // Use CompositeStoreDirectory with format-aware progress tracking
-                final ReplicationStatsDirectoryWrapper statsWrapper = indexShard.isOptimizedIndex()
-                    ? new CompositeStoreDirectoryStatsWrapper((CompositeStoreDirectory) storeDirectory, fileProgressTracker)
-                    : new ReplicationStatsDirectoryWrapper(storeDirectory, fileProgressTracker);
+                final ReplicationStatsDirectoryWrapper statsWrapper = new ReplicationStatsDirectoryWrapper(storeDirectory, fileProgressTracker);
 
                 // After the for loop that builds toDownloadFileMetadata
                 if (toDownloadFileMetadata.isEmpty()) {
