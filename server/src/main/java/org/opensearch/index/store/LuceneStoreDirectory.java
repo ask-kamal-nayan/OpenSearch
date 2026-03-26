@@ -41,7 +41,7 @@ public class LuceneStoreDirectory implements FormatStoreDirectory<DataFormat> {
         Path shardPath,
         Directory directory
     ) throws IOException {
-        this.directoryPath = shardPath.resolve("lucene");
+        this.directoryPath = shardPath.resolve("index");
         Files.createDirectories(this.directoryPath);
 
         // Use the provided Directory directly

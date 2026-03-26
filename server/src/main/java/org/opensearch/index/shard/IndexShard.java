@@ -5877,7 +5877,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         try {
             final Directory storeDirectory;
             if (recoveryState.getStage() == RecoveryState.Stage.INDEX) {
-                Store.StoreDirectory directory = isOptimizedIndex() ? store().compositeStoreDirectory() : (Store.StoreDirectory) store().directory();
+                Directory directory = isOptimizedIndex() ? store().compositeStoreDirectory() : store().directory();
                 storeDirectory = new StoreRecovery.StatsDirectoryWrapper(directory, recoveryState.getIndex());
                 for (String file : filteredSegments.keySet()) {
                     long checksum = Long.parseLong(filteredSegments.get(file).getChecksum());
@@ -5966,9 +5966,9 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         final Directory storeDirectory;
         if (recoveryState.getStage() == RecoveryState.Stage.INDEX) {
             // Fix: Add isOptimizedIndex() check for optimized indices
-            Store.StoreDirectory directory = isOptimizedIndex()
+            Directory directory = isOptimizedIndex()
                 ? store().compositeStoreDirectory()
-                : (Store.StoreDirectory) store().directory();
+                : store().directory();
             storeDirectory = new StoreRecovery.StatsDirectoryWrapper(directory, recoveryState.getIndex());
             for (String file : uploadedSegments.keySet()) {
                 long checksum = Long.parseLong(uploadedSegments.get(file).getChecksum());
