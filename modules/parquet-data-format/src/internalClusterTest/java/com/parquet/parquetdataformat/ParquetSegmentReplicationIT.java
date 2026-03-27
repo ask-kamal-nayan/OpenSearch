@@ -292,9 +292,10 @@ public class ParquetSegmentReplicationIT extends RemoteStoreBaseIntegTestCase {
             for (String file : replicaMetadataMap.keySet()) {
                 FileMetadata fileMetadata = new FileMetadata(file);
                 assertNotNull("FileMetadata should have format", fileMetadata.dataFormat());
+                FileMetadata originalFm = new FileMetadata(replicaMetadataMap.get(file).getOriginalFilename());
                 assertEquals("Format should match in uploaded metadata",
                     fileMetadata.dataFormat(),
-                    replicaMetadataMap.get(file).getOriginalFilename()
+                    originalFm.dataFormat()
                 );
             }
 

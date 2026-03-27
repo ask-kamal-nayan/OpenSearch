@@ -87,7 +87,7 @@ public class RemoteSegmentStoreDirectoryTests extends BaseRemoteSegmentStoreDire
     }
 
     public void testUploadedSegmentMetadataToString() {
-        UploadedSegmentMetadata metadata = new UploadedSegmentMetadata(
+        RemoteDataDirectory.UploadedSegmentMetadata metadata = new UploadedSegmentMetadata(
             "abc",
             "pqr",
             "123456",
@@ -99,18 +99,17 @@ public class RemoteSegmentStoreDirectoryTests extends BaseRemoteSegmentStoreDire
     }
 
     public void testUploadedSegmentMetadataToStringExceptionTooNew() {
-        UploadedSegmentMetadata metadata = new UploadedSegmentMetadata(
+        RemoteDataDirectory.UploadedSegmentMetadata metadata = new RemoteSegmentStoreDirectory.UploadedSegmentMetadata(
             "abc",
             "pqr",
             "123456",
-            1234,
-            "lucene"
+            1234
         );
         assertThrows(IllegalArgumentException.class, () -> metadata.setWrittenByMajor(Version.LATEST.major + 1));
     }
 
     public void testUploadedSegmentMetadataToStringExceptionTooOld() {
-        UploadedSegmentMetadata metadata = new UploadedSegmentMetadata(
+        RemoteDataDirectory.UploadedSegmentMetadata metadata = new UploadedSegmentMetadata(
             "abc",
             "pqr",
             "123456",
@@ -121,7 +120,7 @@ public class RemoteSegmentStoreDirectoryTests extends BaseRemoteSegmentStoreDire
     }
 
     public void testUploadedSegmentMetadataFromString() {
-        UploadedSegmentMetadata metadata = UploadedSegmentMetadata.fromString(
+        RemoteDataDirectory.UploadedSegmentMetadata metadata = UploadedSegmentMetadata.fromString(
             "_0.cfe::_0.cfe__uuidxyz::4567::372000::" + Version.LATEST.major
         );
         assertEquals("_0.cfe::_0.cfe__uuidxyz::4567::372000::" + Version.LATEST.major, metadata.toString());

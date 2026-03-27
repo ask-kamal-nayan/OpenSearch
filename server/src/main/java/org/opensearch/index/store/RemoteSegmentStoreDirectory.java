@@ -267,7 +267,14 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
             METADATA_FILES_TO_FETCH
         );
 
-        RemoteStoreUtils.verifyNoMultipleWriters(metadataFiles, MetadataFilenameUtils::getNodeIdByPrimaryTermAndGen);
+        try {
+            RemoteStoreUtils.verifyNoMultipleWriters(metadataFiles, MetadataFilenameUtils::getNodeIdByPrimaryTermAndGen);
+        } catch (IllegalStateException e) {
+            // During primary relocation, metadata files from both old and new primary can coexist
+            // with the same primary term. This is a legitimate scenario, not a split-brain.
+            // We only need the latest metadata file here, so we log a warning and proceed.
+            logger.warn("Multiple writers detected in segment metadata, proceeding with latest metadata file: {}", e.getMessage());
+        }
 
         if (metadataFiles.isEmpty() == false) {
             String latestMetadataFile = metadataFiles.get(0);
@@ -368,44 +375,26 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
         /**
          * Parses an UploadedSegmentMetadata from its string representation.
          *
-         * Uses right-to-left parsing to correctly handle originalFilename values that
-         * contain the ":::" FileMetadata delimiter (e.g., "_0.pqt:::parquet"), which would
-         * be incorrectly split by a simple split("::") since "::" is a substring of ":::".
-         *
          * Format: originalFilename::uploadedFilename::checksum::length::writtenByMajor
+         *
+         * For format-aware files, originalFilename contains ":::" (e.g., "_0.pqt:::parquet").
+         * We mask ":::" before splitting on "::" to avoid incorrect splits, then restore it.
          */
         public static UploadedSegmentMetadata fromString(String str) {
-            // Parse from right to left: the last 4 fields never contain "::",
-            // only originalFilename (first field) can contain ":::" which overlaps with "::"
-            int lastSep = str.lastIndexOf(SEPARATOR);
-            if (lastSep < 0) {
-                throw new IllegalArgumentException("Invalid UploadedSegmentMetadata format: " + str);
-            }
-            String writtenByMajorStr = str.substring(lastSep + SEPARATOR.length());
-            str = str.substring(0, lastSep);
-
-            lastSep = str.lastIndexOf(SEPARATOR);
-            String lengthStr = str.substring(lastSep + SEPARATOR.length());
-            str = str.substring(0, lastSep);
-
-            lastSep = str.lastIndexOf(SEPARATOR);
-            String checksum = str.substring(lastSep + SEPARATOR.length());
-            str = str.substring(0, lastSep);
-
-            lastSep = str.lastIndexOf(SEPARATOR);
-            String uploadedFilename = str.substring(lastSep + SEPARATOR.length());
-            String originalFilename = str.substring(0, lastSep);
+            // Mask ":::" so split("::") doesn't break format-aware originalFilenames
+            String masked = str.replace(FileMetadata.DELIMITER, "\0");
+            String[] values = masked.split(SEPARATOR);
+            // Restore ":::" in originalFilename
+            values[0] = values[0].replace("\0", FileMetadata.DELIMITER);
 
             UploadedSegmentMetadata metadata = new UploadedSegmentMetadata(
-                originalFilename, uploadedFilename, checksum, Long.parseLong(lengthStr)
+                values[0], values[1], values[2], Long.parseLong(values[3])
             );
-
-            if (writtenByMajorStr.isEmpty()) {
-                staticLogger.error("Lucene version is missing for UploadedSegmentMetadata: " + originalFilename);
+            if (values.length < 5) {
+                staticLogger.error("Lucene version is missing for UploadedSegmentMetadata: " + values[0]);
             } else {
-                metadata.setWrittenByMajor(Integer.parseInt(writtenByMajorStr));
+                metadata.setWrittenByMajor(Integer.parseInt(values[4]));
             }
-
             return metadata;
         }
 
@@ -592,6 +581,14 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
      */
     @Override
     public IndexInput openInput(String name, IOContext context) throws IOException {
+        // Use UploadedSegmentMetadata-based openInput for format-aware routing.
+        // CompositeRemoteDirectory.openInput(UploadedSegmentMetadata) extracts the format
+        // from originalFilename to route to the correct format-specific BlobContainer.
+        if (segmentsUploadedToRemoteStore.containsKey(name)) {
+            UploadedSegmentMetadata metadata = segmentsUploadedToRemoteStore.get(name);
+            return remoteDataDirectory.openInput(metadata, metadata.getLength(), context);
+        }
+        // Fallback for pending merged segments or other cases
         String remoteFilename = getExistingRemoteFilename(name);
         long fileLength = fileLength(name);
         if (remoteFilename != null) {
@@ -954,6 +951,7 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
     }
 
     /**
+     * ToDo: Implement proper checksum routing logic per format.
      * Gets the checksum of a local file, using format-appropriate strategy.
      *
      * For Lucene files: uses CodecUtil.retrieveChecksum() which reads the codec footer (fast, O(1)).

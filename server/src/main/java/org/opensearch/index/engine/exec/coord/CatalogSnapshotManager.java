@@ -61,8 +61,20 @@ public class CatalogSnapshotManager {
         indexFileDeleter.set(new IndexFileDeleter(compositeEngine, latestCatalogSnapshot, shardPath, deleteUnreferencedFiles));
         logger.debug("[RESET_DEBUG] IndexFileDeleter created, latestCatalogSnapshot={}, deleteUnreferencedFiles={}", latestCatalogSnapshot, deleteUnreferencedFiles);
         if(latestCatalogSnapshot != null) {
-            latestCatalogSnapshot.setIndexFileDeleterSupplier(indexFileDeleter::get);
-            latestCatalogSnapshot.setCatalogSnapshotMap(catalogSnapshotMap);
+            // Bump generation on recovery to differentiate from the previous primary's metadata.
+            // This mirrors Lucene's IndexWriter behavior where SegmentInfos.getGeneration() naturally
+            // increments when a new IndexWriter opens (nextWriteGeneration = existingGen + 1).
+            // Without this, after primary relocation, both old and new primaries would upload metadata
+            // with the same generation, causing verifyNoMultipleWriters to falsely detect split-brain.
+            CompositeEngineCatalogSnapshot bumpedSnapshot = new CompositeEngineCatalogSnapshot(
+                latestCatalogSnapshot.getId() + 1,
+                latestCatalogSnapshot.getVersion() + 1,
+                new ArrayList<>(latestCatalogSnapshot.getSegments()),
+                catalogSnapshotMap,
+                indexFileDeleter::get
+            );
+            latestCatalogSnapshot = bumpedSnapshot;
+            catalogSnapshotMap.put(latestCatalogSnapshot.getId(), latestCatalogSnapshot);
         } else {
             latestCatalogSnapshot = new CompositeEngineCatalogSnapshot(1, 1, new ArrayList<>(), catalogSnapshotMap, indexFileDeleter::get);
             catalogSnapshotMap.put(latestCatalogSnapshot.getId(), latestCatalogSnapshot);

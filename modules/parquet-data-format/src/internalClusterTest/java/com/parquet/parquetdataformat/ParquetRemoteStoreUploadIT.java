@@ -10,7 +10,6 @@ package com.parquet.parquetdataformat;
 
 import org.opensearch.action.admin.indices.stats.IndicesStatsRequest;
 import org.opensearch.action.admin.indices.stats.IndicesStatsResponse;
-import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.common.blobstore.BlobPath;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.index.IndexSettings;
@@ -26,6 +25,7 @@ import org.opensearch.remotestore.RemoteStoreBaseIntegTestCase;
 import org.opensearch.test.OpenSearchIntegTestCase;
 import org.opensearch.test.junit.annotations.TestLogging;
 
+import java.io.File;
 import java.io.IOException;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
@@ -361,7 +361,7 @@ public class ParquetRemoteStoreUploadIT extends RemoteStoreBaseIntegTestCase {
 
                 UploadedSegmentMetadata uploadedMeta = metadataMap.get(file);
                 assertEquals("UploadedSegmentMetadata format should match FileMetadata",
-                    fileMetadata.dataFormat(), uploadedMeta.getUploadedFilename());
+                    fileMetadata.dataFormat(), new FileMetadata(uploadedMeta.getOriginalFilename()).dataFormat());
 
                 logger.debug("--> File: {}, Format: {}, RemoteFile: {}",
                     fileMetadata.file(), fileMetadata.dataFormat(), uploadedMeta.getUploadedFilename());

@@ -16,7 +16,7 @@ import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
 import org.opensearch.ExceptionsHelper;
-import org.opensearch.common.annotation.PublicApi;
+import org.opensearch.common.annotation.InternalApi;
 import org.opensearch.common.blobstore.AsyncMultiStreamBlobContainer;
 import org.opensearch.common.blobstore.BlobContainer;
 import org.opensearch.common.blobstore.BlobMetadata;
@@ -42,9 +42,13 @@ import org.opensearch.plugins.PluginsService;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.NoSuchFileException;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.UnaryOperator;
 
@@ -64,10 +68,16 @@ import java.util.function.UnaryOperator;
  *
  * @opensearch.api
  */
-@PublicApi(since = "3.0.0")
+@InternalApi
 public class CompositeRemoteDirectory extends RemoteDirectory {
 
     private static final String DEFAULT_FORMAT = "lucene";
+
+    /**
+     * Formats that should route to the base blobContainer (same path as RemoteDirectory).
+     * Mirrors CompositeStoreDirectory.INDEX_DIRECTORY_FORMATS.
+     */
+    private static final java.util.Set<String> BASE_PATH_FORMATS = java.util.Set.of("lucene", "LUCENE", "metadata");
 
     private final UnaryOperator<OffsetRangeInputStream> uploadRateLimiter;
     private final UnaryOperator<OffsetRangeInputStream> lowPriorityUploadRateLimiter;
@@ -152,8 +162,8 @@ public class CompositeRemoteDirectory extends RemoteDirectory {
      * @return BlobContainer for the format
      */
     public BlobContainer getBlobContainerForFormat(String format) {
-        // "lucene" and unknown formats go to the default blobContainer (baseBlobPath directly)
-        if (format == null || format.isEmpty() || DEFAULT_FORMAT.equals(format)) {
+        // "lucene", "LUCENE", "metadata" and null/empty go to the default blobContainer (baseBlobPath directly)
+        if (format == null || format.isEmpty() || BASE_PATH_FORMATS.contains(format)) {
             return blobContainer; // inherited from RemoteDirectory — points to baseBlobPath
         }
         // Check plugin-registered containers first, then lazily create
@@ -166,28 +176,83 @@ public class CompositeRemoteDirectory extends RemoteDirectory {
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // Aggregated operations across all format containers
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * Lists all blobs across the base container and all format-specific containers.
+     * Results are sorted in UTF-16 order as required by the Directory contract.
+     */
+    @Override
+    public String[] listAll() throws IOException {
+        Set<String> allBlobs = new LinkedHashSet<>(Arrays.asList(super.listAll()));
+        for (Map.Entry<String, BlobContainer> entry : formatBlobContainers.entrySet()) {
+            allBlobs.addAll(entry.getValue().listBlobs().keySet());
+        }
+        String[] result = allBlobs.toArray(new String[0]);
+        Arrays.sort(result);
+        return result;
+    }
+
+    /**
+     * Format-aware deleteFile override.
+     *
+     * <p>Parses the name (which may contain ":::format") to determine which BlobContainer
+     * to delete from. For plain blob names without format info (e.g., "_0.cfs__UUID"),
+     * deletes from the base container.
+     */
+    @Override
+    public void deleteFile(String name) throws IOException {
+        FileMetadata fileMetadata = new FileMetadata(name);
+        BlobContainer container = getBlobContainerForFormat(fileMetadata.dataFormat());
+        container.deleteBlobsIgnoringIfNotExists(Collections.singletonList(name));
+    }
+
+    /**
+     * Format-aware batch delete override.
+     *
+     * <p>Note: This method receives plain blob names (e.g., "_0.parquet__UUID") without format info,
+     * so it attempts deletion from ALL containers (base + format-specific). This is used during
+     * stale segment cleanup where the caller doesn't have format information.
+     */
+    @Override
+    public void deleteFiles(List<String> names) throws IOException {
+        if (names == null || names.isEmpty()) {
+            return;
+        }
+        // Delete from base container (handles lucene/metadata blobs)
+        super.deleteFiles(names);
+        // Also attempt deletion from all format-specific containers
+        // (blob names are unique, so only the correct container will find the blob)
+        for (BlobContainer container : formatBlobContainers.values()) {
+            container.deleteBlobsIgnoringIfNotExists(names);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // String-based overrides — called by RemoteSegmentStoreDirectory
     // These parse "filename:::format" from the src string
     // ═══════════════════════════════════════════════════════════════
 
     /**
-     * Format-aware sync copyFrom override.
+     * Sync copyFrom override that properly handles format-aware local files.
      *
      * <p>When AsyncMultiStreamBlobContainer is not available (e.g., FS-based blob store in tests),
-     * this fallback is used. Parses the src string (e.g., "_0.pqt:::parquet") to determine
-     * which format-specific BlobContainer to write to.
+     * this fallback is used. The src string may contain ":::format" (e.g., "_0.pqt:::parquet")
+     * which the source CompositeStoreDirectory handles via parseFilePath().
+     *
+     * <p>Routes to the format-specific BlobContainer via {@link #getBlobContainerForFormat(String)}:
+     * lucene/metadata files → base blobContainer, non-lucene formats (parquet, etc.) → format-specific sub-path.
+     * The download side uses {@link #openInput(RemoteSegmentStoreDirectory.UploadedSegmentMetadata, long, IOContext)}
+     * which performs the same format-aware routing.
      */
     @Override
     public void copyFrom(Directory from, String src, String dest, IOContext context) throws IOException {
+        logger.debug("Sync copyFrom: src={}, dest={}", src, dest);
         FileMetadata fileMetadata = new FileMetadata(src);
         BlobContainer container = getBlobContainerForFormat(fileMetadata.dataFormat());
-
-        logger.debug(
-            "Format-aware sync copyFrom: src={}, format={}, dest={}, container={}",
-            src, fileMetadata.dataFormat(), dest, container.path()
-        );
-
-        // Use format-specific BlobContainer for the output
+        // Read from local directory (CompositeStoreDirectory handles ":::format" in src)
+        // Write to format-specific BlobContainer (lucene→base, parquet→parquet sub-path, etc.)
         try (IndexInput is = from.openInput(src, context);
              IndexOutput os = new RemoteIndexOutput(dest, container)) {
             os.copyBytes(is, is.length());
@@ -565,6 +630,39 @@ public class CompositeRemoteDirectory extends RemoteDirectory {
         } catch (Exception e) {
             logger.warn("Exception while calling asyncBlobUpload for {}, closing IndexInput", fileMetadata.file());
             indexInput.close();
+            throw e;
+        }
+    }
+
+    /**
+     * Opens a stream for reading the existing file and returns {@link RemoteIndexInput} enclosing
+     * the stream.
+     * @param name the name of an existing file.
+     * @param fileLength file length
+     * @param context desired {@link IOContext} context
+     * @return the {@link RemoteIndexInput} enclosing the block stream
+     * @throws IOException in case of I/O error
+     * @throws NoSuchFileException if the file does not exist
+     */
+    @Override
+    public IndexInput openInput(String name, long fileLength, IOContext context) throws IOException {
+        FileMetadata fileMetadata = new FileMetadata(name);
+        BlobContainer container = getBlobContainerForFormat(fileMetadata.dataFormat());
+        InputStream inputStream = null;
+        try {
+            inputStream = container.readBlob(name);
+            UnaryOperator<InputStream> rateLimiter = downloadRateLimiterProvider.get(name);
+            return new RemoteIndexInput(name, rateLimiter.apply(inputStream), fileLength);
+        } catch (Exception e) {
+            // In case the RemoteIndexInput creation fails, close the input stream to avoid file handler leak.
+            if (inputStream != null) {
+                try {
+                    inputStream.close();
+                } catch (Exception closeEx) {
+                    e.addSuppressed(closeEx);
+                }
+            }
+            logger.error("Exception while reading blob for file: " + name + " for path " + blobContainer.path());
             throw e;
         }
     }
