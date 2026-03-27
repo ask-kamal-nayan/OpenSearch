@@ -475,6 +475,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
             (shardId) -> ReplicationStats.empty(),
             clusterDefaultMaxMergeAtOnce,
             clusterMergeSchedulerConfig,
+            null,
             null
         );
     }
