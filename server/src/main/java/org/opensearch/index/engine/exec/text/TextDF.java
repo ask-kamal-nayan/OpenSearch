@@ -20,6 +20,7 @@ import org.opensearch.index.mapper.MapperService;
 import org.opensearch.index.shard.ShardPath;
 import org.opensearch.index.store.FormatStoreDirectory;
 import org.opensearch.index.store.GenericStoreDirectory;
+import org.opensearch.index.store.checksum.ChecksumHandler;
 import org.opensearch.plugins.DataSourcePlugin;
 import org.opensearch.plugins.Plugin;
 
@@ -69,5 +70,10 @@ public class TextDF extends Plugin implements DataFormat, DataSourcePlugin {
     @Override
     public DataFormat getDataFormat() {
         return new TextDF();
+    }
+
+    @Override
+    public ChecksumHandler getChecksumHandler() {
+        return null;
     }
 }

@@ -16,6 +16,8 @@ import org.opensearch.index.engine.exec.DataFormat;
 import org.opensearch.index.engine.exec.IndexingExecutionEngine;
 import org.opensearch.index.mapper.MapperService;
 import org.opensearch.index.shard.ShardPath;
+import org.opensearch.index.store.checksum.ChecksumHandler;
+import org.opensearch.index.store.checksum.GenericCRC32ChecksumHandler;
 import org.opensearch.plugins.spi.vectorized.DataSourceCodec;
 import org.opensearch.index.store.FormatStoreDirectory;
 
@@ -38,4 +40,19 @@ public interface DataSourcePlugin {
     BlobContainer createBlobContainer(BlobStore blobStore, BlobPath blobPath) throws IOException;
 
     DataFormat getDataFormat();
+
+    /**
+     * Provides a format-specific checksum handler for this data format plugin.
+     *
+     * <p>If not overridden, a {@link GenericCRC32ChecksumHandler} is returned that
+     * computes CRC32 over the full file contents. Plugins can override this to provide
+     * format-specific checksum strategies (e.g., reading checksum from Parquet footer).</p>
+     *
+     * <p>The returned handler's format name must match {@code getDataFormat().name()}.</p>
+     *
+     * @return a ChecksumHandler for this format's files
+     */
+    default ChecksumHandler getChecksumHandler() {
+        return new GenericCRC32ChecksumHandler(getDataFormat().name());
+    }
 }

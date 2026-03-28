@@ -10,7 +10,6 @@ package org.opensearch.index.store;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.apache.lucene.codecs.CodecUtil;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
@@ -18,11 +17,11 @@ import org.apache.lucene.store.IndexOutput;
 import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.index.engine.exec.FileMetadata;
 import org.opensearch.index.shard.ShardPath;
+import org.opensearch.index.store.checksum.ChecksumHandlerRegistry;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.util.Set;
-import java.util.zip.CRC32;
 
 /**
  * Format-aware composite directory that extends {@link SubdirectoryAwareDirectory}.
@@ -78,31 +77,49 @@ public class CompositeStoreDirectory extends SubdirectoryAwareDirectory {
     private static final Set<String> INDEX_DIRECTORY_FORMATS = Set.of("lucene", "LUCENE", "metadata");
 
     /**
-     * Buffer size for CRC32 checksum calculation.
-     */
-    private static final int CHECKSUM_BUFFER_SIZE = 8192;
-
-    /**
      * Set of registered non-Lucene format names (e.g., "parquet", "arrow").
-     * Used to determine which checksum strategy to apply:
-     * <ul>
-     *   <li>Formats in this set → generic CRC32 checksum (full-file scan)</li>
-     *   <li>Everything else → Lucene CodecUtil checksum (codec footer)</li>
-     * </ul>
      */
     private final Set<String> registeredFormats;
 
     /**
-     * Constructs a CompositeStoreDirectory.
+     * Registry that maps format names to their checksum handlers.
+     * Used for format-specific checksum calculation via the Strategy pattern.
+     */
+    private final ChecksumHandlerRegistry checksumRegistry;
+
+    /**
+     * Constructs a CompositeStoreDirectory with a default ChecksumHandlerRegistry.
+     *
+     * <p>This constructor is provided for backward compatibility. It creates a default
+     * registry with only the built-in Lucene handler. Non-Lucene formats will use the
+     * generic CRC32 fallback.</p>
      *
      * @param delegate          the underlying FSDirectory (typically for &lt;shard&gt;/index/)
      * @param shardPath         the shard path for resolving subdirectories
      * @param registeredFormats set of non-Lucene format names discovered from plugins
-     *                          (e.g., {"parquet", "arrow"}). These formats use generic CRC32 checksums.
+     *                          (e.g., {"parquet", "arrow"}).
      */
     public CompositeStoreDirectory(Directory delegate, ShardPath shardPath, Set<String> registeredFormats) {
+        this(delegate, shardPath, registeredFormats, new ChecksumHandlerRegistry());
+    }
+
+    /**
+     * Constructs a CompositeStoreDirectory with a custom ChecksumHandlerRegistry.
+     *
+     * <p>This is the preferred constructor. The registry is built by
+     * {@code DefaultCompositeStoreDirectoryFactory} from plugin-provided checksum handlers.</p>
+     *
+     * @param delegate          the underlying FSDirectory (typically for &lt;shard&gt;/index/)
+     * @param shardPath         the shard path for resolving subdirectories
+     * @param registeredFormats set of non-Lucene format names discovered from plugins
+     *                          (e.g., {"parquet", "arrow"}).
+     * @param checksumRegistry  registry of format-specific checksum handlers
+     */
+    public CompositeStoreDirectory(Directory delegate, ShardPath shardPath, Set<String> registeredFormats,
+                                   ChecksumHandlerRegistry checksumRegistry) {
         super(delegate, shardPath);
         this.registeredFormats = registeredFormats;
+        this.checksumRegistry = checksumRegistry;
 
         // Pre-create format subdirectories so that native writers (e.g., Rust Parquet writer)
         // can access them directly without going through Java's Directory API.
@@ -114,8 +131,8 @@ public class CompositeStoreDirectory extends SubdirectoryAwareDirectory {
             }
         }
 
-        logger.debug("Created CompositeStoreDirectory for shard {} with registered formats: {}",
-            shardPath.getShardId(), registeredFormats);
+        logger.debug("Created CompositeStoreDirectory for shard {} with registered formats: {}, checksum handlers: {}",
+            shardPath.getShardId(), registeredFormats, checksumRegistry.getRegisteredFormats());
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -162,6 +179,11 @@ public class CompositeStoreDirectory extends SubdirectoryAwareDirectory {
      * @return FileMetadata with parsed dataFormat and filename
      */
     public FileMetadata toFileMetadata(String fileIdentifier) {
+        // Handle "file:::format" convention (serialized FileMetadata from UploaderService)
+        if (fileIdentifier.contains(FileMetadata.DELIMITER)) {
+            return new FileMetadata(fileIdentifier);
+        }
+        // Handle "format/file" convention
         int slash = fileIdentifier.indexOf('/');
         if (slash >= 0) {
             String format = fileIdentifier.substring(0, slash);
@@ -215,17 +237,17 @@ public class CompositeStoreDirectory extends SubdirectoryAwareDirectory {
     /**
      * Calculates the checksum using a {@link FileMetadata} object for format-aware routing.
      *
+     * <p>Delegates to the appropriate {@link org.opensearch.index.store.checksum.ChecksumHandler}
+     * registered in the {@link ChecksumHandlerRegistry} for the file's data format.</p>
+     *
      * @param fm the FileMetadata containing format and filename information
      * @return the checksum value
      * @throws IOException if checksum calculation fails
      */
     public long calculateChecksum(FileMetadata fm) throws IOException {
         String fileIdentifier = toFileIdentifier(fm);
-
-        if (isLuceneFormat(fm.dataFormat())) {
-            return calculateLuceneChecksum(fileIdentifier);
-        } else {
-            return calculateGenericChecksum(fileIdentifier);
+        try (IndexInput input = openInput(fileIdentifier, IOContext.READONCE)) {
+            return checksumRegistry.calculateChecksum(fm.dataFormat(), input);
         }
     }
 
@@ -390,60 +412,15 @@ public class CompositeStoreDirectory extends SubdirectoryAwareDirectory {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // Private Helpers
+    // Accessor for ChecksumHandlerRegistry
     // ═══════════════════════════════════════════════════════════════
 
     /**
-     * Determines if a format name represents Lucene/index files.
-     * A format is considered Lucene if it is NOT in the set of registered non-Lucene formats.
+     * Returns the checksum handler registry used by this directory.
      *
-     * @param format the format name to check
-     * @return true if the format should use Lucene checksum (CodecUtil), false for generic CRC32
+     * @return the ChecksumHandlerRegistry
      */
-    private boolean isLuceneFormat(String format) {
-        return !registeredFormats.contains(format);
-    }
-
-    /**
-     * Calculates checksum using Lucene's CodecUtil.
-     *
-     * <p>Lucene files embed a CRC32 checksum in a "codec footer" at the end of every file.
-     * This method reads only the footer (last 8 bytes), making it O(1) regardless of file size.</p>
-     *
-     * @param fileIdentifier the file identifier to open
-     * @return the checksum value from the Lucene codec footer
-     * @throws IOException if the file cannot be read or has no valid codec footer
-     */
-    private long calculateLuceneChecksum(String fileIdentifier) throws IOException {
-        try (IndexInput input = openInput(fileIdentifier, IOContext.READONCE)) {
-            return CodecUtil.retrieveChecksum(input);
-        }
-    }
-
-    /**
-     * Calculates a generic CRC32 checksum over the entire file contents.
-     *
-     * <p>This works for any file format (Parquet, Arrow, etc.) but is O(n) in file size
-     * because it reads every byte. Used for formats that do not embed a Lucene codec footer.</p>
-     *
-     * @param fileIdentifier the file identifier to open
-     * @return the CRC32 checksum value
-     * @throws IOException if the file cannot be read
-     */
-    private long calculateGenericChecksum(String fileIdentifier) throws IOException {
-        try (IndexInput input = openInput(fileIdentifier, IOContext.READONCE)) {
-            CRC32 crc32 = new CRC32();
-            byte[] buffer = new byte[CHECKSUM_BUFFER_SIZE];
-            long remaining = input.length();
-
-            while (remaining > 0) {
-                int toRead = (int) Math.min(buffer.length, remaining);
-                input.readBytes(buffer, 0, toRead);
-                crc32.update(buffer, 0, toRead);
-                remaining -= toRead;
-            }
-
-            return crc32.getValue();
-        }
+    public ChecksumHandlerRegistry getChecksumRegistry() {
+        return checksumRegistry;
     }
 }

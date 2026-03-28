@@ -87,7 +87,7 @@ public class RemoteSegmentStoreDirectoryTests extends BaseRemoteSegmentStoreDire
     }
 
     public void testUploadedSegmentMetadataToString() {
-        RemoteDataDirectory.UploadedSegmentMetadata metadata = new UploadedSegmentMetadata(
+        UploadedSegmentMetadata metadata = new UploadedSegmentMetadata(
             "abc",
             "pqr",
             "123456",

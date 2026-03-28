@@ -15,6 +15,7 @@ import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.shard.ShardPath;
+import org.opensearch.index.store.checksum.ChecksumHandlerRegistry;
 import org.opensearch.plugins.DataSourcePlugin;
 import org.opensearch.plugins.PluginsService;
 
@@ -57,11 +58,20 @@ public class DefaultCompositeStoreDirectoryFactory implements CompositeStoreDire
         }
 
         try {
+            // Discover DataSourcePlugins
+            var dataSourcePlugins = pluginsService.filterPlugins(DataSourcePlugin.class);
+
             // Discover registered non-Lucene format names from plugins
-            Set<String> registeredFormats = pluginsService.filterPlugins(DataSourcePlugin.class)
+            Set<String> registeredFormats = dataSourcePlugins
                 .stream()
                 .map(plugin -> plugin.getDataFormat().name())
                 .collect(Collectors.toSet());
+
+            // Build ChecksumHandlerRegistry from plugin-provided checksum handlers
+            ChecksumHandlerRegistry checksumRegistry = new ChecksumHandlerRegistry();
+            for (DataSourcePlugin plugin : dataSourcePlugins) {
+                checksumRegistry.registerHandler(plugin.getChecksumHandler());
+            }
 
             // Create FSDirectory on the shard's index/ directory as the delegate
             FSDirectory delegate = FSDirectory.open(shardPath.resolveIndex());
@@ -69,12 +79,13 @@ public class DefaultCompositeStoreDirectoryFactory implements CompositeStoreDire
             CompositeStoreDirectory compositeDirectory = new CompositeStoreDirectory(
                 delegate,
                 shardPath,
-                registeredFormats
+                registeredFormats,
+                checksumRegistry
             );
 
             if (logger.isDebugEnabled()) {
-                logger.debug("Successfully created CompositeStoreDirectory for shard: {} with registered formats: {}",
-                    shardPath.getShardId(), registeredFormats);
+                logger.debug("Successfully created CompositeStoreDirectory for shard: {} with registered formats: {}, checksum handlers: {}",
+                    shardPath.getShardId(), registeredFormats, checksumRegistry.getRegisteredFormats());
             }
 
             return compositeDirectory;
