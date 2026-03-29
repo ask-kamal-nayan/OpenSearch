@@ -10,11 +10,16 @@ package org.opensearch.index.engine.exec.coord;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.apache.lucene.index.SegmentInfos;
+import org.apache.lucene.store.ByteBuffersDataOutput;
+import org.apache.lucene.store.ByteBuffersIndexOutput;
+import org.apache.lucene.util.Version;
 import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.common.io.stream.BytesStreamOutput;
 import org.opensearch.core.common.io.stream.*;
 import org.opensearch.index.engine.exec.FileMetadata;
 import org.opensearch.index.engine.exec.WriterFileSet;
+import org.opensearch.indices.replication.checkpoint.ReplicationCheckpoint;
 
 import java.io.*;
 import java.nio.file.Path;
@@ -227,6 +232,33 @@ public class CompositeEngineCatalogSnapshot extends CatalogSnapshot {
     @Override
     public long getId() {
         return generation;
+    }
+
+    /**
+     * For composite/optimized indices, all files use Version.LATEST.major.
+     */
+    @Override
+    public int getLuceneVersionForFile(String file) {
+        return Version.LATEST.major;
+    }
+
+    /**
+     * Creates a synthetic SegmentInfos with this CatalogSnapshot serialized into userData,
+     * so it can be reconstructed on recovery.
+     */
+    @Override
+    public byte[] serializeToSegmentInfosBytes(ReplicationCheckpoint replicationCheckpoint) throws IOException {
+        SegmentInfos segmentInfosToSerialize = new SegmentInfos(Version.LATEST.major);
+        Map<String, String> syntheticUserData = new HashMap<>(getUserData());
+        syntheticUserData.put(CatalogSnapshot.CATALOG_SNAPSHOT_KEY, serializeToString());
+        segmentInfosToSerialize.setUserData(syntheticUserData, false);
+        segmentInfosToSerialize.setNextWriteGeneration(replicationCheckpoint.getSegmentsGen());
+
+        ByteBuffersDataOutput byteBuffersIndexOutput = new ByteBuffersDataOutput();
+        segmentInfosToSerialize.write(
+            new ByteBuffersIndexOutput(byteBuffersIndexOutput, "Snapshot of SegmentInfos", "SegmentInfos")
+        );
+        return byteBuffersIndexOutput.toArrayCopy();
     }
 
     @Override

@@ -8,6 +8,8 @@
 
 package org.opensearch.index.engine.exec.coord;
 
+import org.apache.lucene.index.SegmentCommitInfo;
+import org.apache.lucene.index.SegmentInfo;
 import org.apache.lucene.index.SegmentInfos;
 import org.apache.lucene.store.BufferedChecksumIndexInput;
 import org.opensearch.common.lucene.store.ByteArrayIndexInput;
@@ -17,10 +19,13 @@ import org.opensearch.core.common.io.stream.StreamInput;
 import org.opensearch.core.common.io.stream.StreamOutput;
 import org.opensearch.index.engine.exec.FileMetadata;
 import org.opensearch.index.engine.exec.WriterFileSet;
+import org.opensearch.index.remote.RemoteStoreUtils;
+import org.opensearch.indices.replication.checkpoint.ReplicationCheckpoint;
 
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -127,8 +132,61 @@ public class SegmentInfosCatalogSnapshot extends CatalogSnapshot {
     }
 
     @Override
-    public  void setUserData(Map<String, String> userData, boolean b)
-    {
-        // TODO no op since SegmentInfosCatalogSnapshot is not refcounted
+    public void setUserData(Map<String, String> userData, boolean b) {
+        // Update the internal SegmentInfos userData so callers don't need instanceof checks
+        segmentInfos.setUserData(userData, b);
+    }
+
+    /**
+     * Returns the Lucene major version that wrote the given segment file by looking it up
+     * from the SegmentInfos. Falls back to the SegmentInfos commit version for the segments
+     * file itself, or to the .si file's version for other unmapped files.
+     */
+    @Override
+    public int getLuceneVersionForFile(String file) {
+        Map<String, Integer> versionMap = buildSegmentToLuceneVersionMap();
+        Integer version = versionMap.get(file);
+        if (version != null) {
+            return version;
+        }
+        // Check if this is the segments file itself
+        if (file.equals(segmentInfos.getSegmentsFileName())) {
+            return segmentInfos.getCommitLuceneVersion().major;
+        }
+        // Fallback to the Lucene major version of the respective segment's .si file
+        String segmentInfoFileName = RemoteStoreUtils.getSegmentName(file) + ".si";
+        Integer siVersion = versionMap.get(segmentInfoFileName);
+        if (siVersion != null) {
+            return siVersion;
+        }
+        return org.apache.lucene.util.Version.LATEST.major;
+    }
+
+    /**
+     * Serializes the actual SegmentInfos to bytes for the remote metadata file.
+     */
+    @Override
+    public byte[] serializeToSegmentInfosBytes(ReplicationCheckpoint replicationCheckpoint) throws IOException {
+        ByteBuffersDataOutput byteBuffersIndexOutput = new ByteBuffersDataOutput();
+        segmentInfos.write(
+            new ByteBuffersIndexOutput(byteBuffersIndexOutput, "Snapshot of SegmentInfos", "SegmentInfos")
+        );
+        return byteBuffersIndexOutput.toArrayCopy();
+    }
+
+    /**
+     * Builds a map of segment file name to the Lucene major version that wrote it,
+     * by walking the SegmentInfos.
+     */
+    private Map<String, Integer> buildSegmentToLuceneVersionMap() {
+        Map<String, Integer> segmentToLuceneVersion = new HashMap<>();
+        for (SegmentCommitInfo segmentCommitInfo : segmentInfos) {
+            SegmentInfo info = segmentCommitInfo.info;
+            Set<String> segFiles = info.files();
+            for (String segFile : segFiles) {
+                segmentToLuceneVersion.put(segFile, info.getVersion().major);
+            }
+        }
+        return segmentToLuceneVersion;
     }
 }

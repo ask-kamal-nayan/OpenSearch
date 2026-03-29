@@ -152,7 +152,9 @@ public class MultiFileWriter extends AbstractRefCounted implements Releasable {
         if (isOptimizedIndex() && !fileName.startsWith(IndexFileNames.SEGMENTS)) {
             CompositeStoreDirectory compositeDir = store.compositeStoreDirectory();
             if (compositeDir != null) {
-                FileMetadata fileMetadata = new FileMetadata(metadata.dataFormat(), tempFileName);
+                // Derive format from metadata.name() which contains :::format for optimized indices
+                String format = new FileMetadata(metadata.name()).dataFormat();
+                FileMetadata fileMetadata = new FileMetadata(format, tempFileName);
                 indexOutput = compositeDir.createOutput(fileMetadata, IOContext.DEFAULT);
             } else {
                 throw new IOException("CompositeStoreDirectory required but not available for optimized index file: " + fileName);
@@ -254,7 +256,9 @@ public class MultiFileWriter extends AbstractRefCounted implements Releasable {
                     CompositeStoreDirectory compositeDir = store.compositeStoreDirectory();
                     if (compositeDir != null) {
                         try {
-                            FileMetadata fileMetadata = new FileMetadata(md.dataFormat(), tempFile);
+                            // Derive format from md.name() which contains :::format for optimized indices
+                            String format = new FileMetadata(md.name()).dataFormat();
+                            FileMetadata fileMetadata = new FileMetadata(format, tempFile);
                             compositeDir.deleteFile(fileMetadata);
                         } catch (Exception e) {
                             logger.debug(
@@ -317,10 +321,12 @@ public class MultiFileWriter extends AbstractRefCounted implements Releasable {
                     StoreFileMetadata md = tempFileMetadata.get(tempFile);
 
                     logger.debug("Renaming composite file [{}] -> [{}] with format [{}]",
-                        tempFile, origFile, md.dataFormat());
+                        tempFile, origFile, new FileMetadata(md.name()).dataFormat());
 
-                    FileMetadata tempMeta = new FileMetadata(md.dataFormat(), tempFile);
-                    FileMetadata origMeta = new FileMetadata(md.dataFormat(), origFile);
+                    // Derive format from md.name() which contains :::format for optimized indices
+                    String format = new FileMetadata(md.name()).dataFormat();
+                    FileMetadata tempMeta = new FileMetadata(format, tempFile);
+                    FileMetadata origMeta = new FileMetadata(format, origFile);
 
                     // Delete original if exists (same pattern as localDirectoryContains checksum mismatch handling)
                     try {

@@ -120,25 +120,26 @@ public class CompositeRemoteDirectory extends RemoteDirectory {
 
         // Initialize format-specific BlobContainers from plugins
         if (pluginsService != null) {
-            try {
-                pluginsService.filterPlugins(DataSourcePlugin.class).forEach(plugin -> {
-                    try {
-                        formatBlobContainers.put(
-                            plugin.getDataFormat().name(),
-                            plugin.createBlobContainer(blobStore, baseBlobPath)
-                        );
-                    } catch (IOException e) {
-                        logger.error(
-                            "Failed to create blob container for dataformat {} at base path {}",
-                            plugin.getDataFormat().name(),
-                            baseBlobPath,
-                            e
-                        );
-                        throw new RuntimeException(e);
+            List<DataSourcePlugin> dataSourcePlugins = pluginsService.filterPlugins(DataSourcePlugin.class);
+            if (dataSourcePlugins != null) {
+                for (DataSourcePlugin plugin : dataSourcePlugins) {
+                    if (plugin != null && plugin.getDataFormat() != null) {
+                        try {
+                            BlobContainer container = plugin.createBlobContainer(blobStore, baseBlobPath);
+                            if (container != null) {
+                                formatBlobContainers.put(plugin.getDataFormat().name(), container);
+                            }
+                        } catch (IOException e) {
+                            logger.error(
+                                "Failed to create blob container for dataformat {} at base path {}",
+                                plugin.getDataFormat().name(),
+                                baseBlobPath,
+                                e
+                            );
+                            throw new RuntimeException(e);
+                        }
                     }
-                });
-            } catch (NullPointerException e) {
-                // No plugins available — this is fine
+                }
             }
         }
 
@@ -222,8 +223,12 @@ public class CompositeRemoteDirectory extends RemoteDirectory {
         }
         // Delete from base container (handles lucene/metadata blobs)
         super.deleteFiles(names);
-        // Also attempt deletion from all format-specific containers
-        // (blob names are unique, so only the correct container will find the blob)
+
+        // Broadcast delete to every format-specific container. This is intentionally speculative:
+        // blob names are UUID-suffixed and globally unique, so at most one container holds each
+        // blob. deleteBlobsIgnoringIfNotExists is a silent no-op for containers that don't have
+        // the blob, making this safe and idempotent. See class-level and method-level javadoc
+        // for the full design rationale.
         for (BlobContainer container : formatBlobContainers.values()) {
             container.deleteBlobsIgnoringIfNotExists(names);
         }

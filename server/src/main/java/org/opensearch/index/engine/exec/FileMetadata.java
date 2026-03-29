@@ -31,11 +31,21 @@ public class FileMetadata {
             this.file = dataFormatAwareFile;
             return;
         }
-        String[] parts = dataFormatAwareFile.split(DELIMITER);
-        this.dataFormat = (parts.length == 1)
-            ? "lucene"
-            : parts[1];
-        this.file = parts[0];
+        if (dataFormatAwareFile.contains(DELIMITER)) {
+            // Serialized form: "_0.parquet:::parquet"
+            String[] parts = dataFormatAwareFile.split(DELIMITER);
+            this.dataFormat = parts[1];
+            this.file = parts[0];
+        } else if (dataFormatAwareFile.contains("/")) {
+            // Path-style form: "parquet/_0.parquet"
+            int slash = dataFormatAwareFile.indexOf('/');
+            this.dataFormat = dataFormatAwareFile.substring(0, slash);
+            this.file = dataFormatAwareFile.substring(slash + 1);
+        } else {
+            // Plain filename: "_0.cfs"
+            this.dataFormat = "lucene";
+            this.file = dataFormatAwareFile;
+        }
     }
 
     public String serialize() {

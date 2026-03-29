@@ -109,10 +109,10 @@ public class ReplicationCheckpoint implements Writeable, Comparable<ReplicationC
         this.createdTimeStamp = DateUtils.toLong(Instant.now());
 
         // Convert legacy metadata to format-aware metadata
+        // Format is derived from the key (filename) which contains :::format for optimized indices
         Map<FileMetadata, StoreFileMetadata> convertedMap = new HashMap<>();
         for (Map.Entry<String, StoreFileMetadata> entry : legacyMetadataMap.entrySet()) {
-            String dataFormat = entry.getValue().dataFormat() != null ? entry.getValue().dataFormat() : "lucene";
-            FileMetadata fileMetadata = new FileMetadata(dataFormat, entry.getKey());
+            FileMetadata fileMetadata = new FileMetadata(entry.getKey());
             convertedMap.put(fileMetadata, entry.getValue());
         }
         this.formatAwareMetadataMap = convertedMap;
@@ -140,8 +140,7 @@ public class ReplicationCheckpoint implements Writeable, Comparable<ReplicationC
         // Convert legacy metadata to format-aware metadata
         Map<FileMetadata, StoreFileMetadata> convertedMap = new HashMap<>();
         for (Map.Entry<String, StoreFileMetadata> entry : legacyMetadataMap.entrySet()) {
-            String dataFormat = entry.getValue().dataFormat() != null ? entry.getValue().dataFormat() : "lucene";
-            FileMetadata fileMetadata = new FileMetadata(dataFormat, entry.getKey());
+            FileMetadata fileMetadata = new FileMetadata(entry.getKey());
             convertedMap.put(fileMetadata, entry.getValue());
         }
         this.formatAwareMetadataMap = convertedMap;
@@ -230,8 +229,8 @@ public class ReplicationCheckpoint implements Writeable, Comparable<ReplicationC
             Map<String, StoreFileMetadata> legacyMap = in.readMap(StreamInput::readString, StoreFileMetadata::new);
             Map<FileMetadata, StoreFileMetadata> convertedMap = new HashMap<>();
             for (Map.Entry<String, StoreFileMetadata> entry : legacyMap.entrySet()) {
-                String dataFormat = entry.getValue().dataFormat() != null ? entry.getValue().dataFormat() : "lucene";
-                FileMetadata fileMetadata = new FileMetadata(dataFormat, entry.getKey());
+                // For legacy format, derive format from key (defaults to "lucene" for plain filenames)
+                FileMetadata fileMetadata = new FileMetadata(entry.getKey());
                 convertedMap.put(fileMetadata, entry.getValue());
             }
             this.formatAwareMetadataMap = convertedMap;

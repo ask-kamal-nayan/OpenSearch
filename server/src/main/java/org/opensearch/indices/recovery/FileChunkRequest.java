@@ -72,8 +72,7 @@ public final class FileChunkRequest extends RecoveryTransportRequest {
         lastChunk = in.readBoolean();
         totalTranslogOps = in.readVInt();
         sourceThrottleTimeInNanos = in.readLong();
-        String dataFormat = in.readString();
-        metadata = new StoreFileMetadata(name, length, checksum, writtenBy, dataFormat);
+        metadata = new StoreFileMetadata(name, length, checksum, writtenBy);
     }
 
     public FileChunkRequest(
@@ -144,7 +143,6 @@ public final class FileChunkRequest extends RecoveryTransportRequest {
         out.writeBoolean(lastChunk);
         out.writeVInt(totalTranslogOps);
         out.writeLong(sourceThrottleTimeInNanos);
-        out.writeString(metadata.dataFormat());
     }
 
     @Override

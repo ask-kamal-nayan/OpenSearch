@@ -13,11 +13,6 @@ import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.apache.lucene.codecs.CodecUtil;
 import org.apache.lucene.index.IndexFileNames;
-import org.apache.lucene.index.SegmentCommitInfo;
-import org.apache.lucene.index.SegmentInfo;
-import org.apache.lucene.index.SegmentInfos;
-import org.apache.lucene.store.ByteBuffersDataOutput;
-import org.apache.lucene.store.ByteBuffersIndexOutput;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FilterDirectory;
 import org.apache.lucene.store.IOContext;
@@ -37,8 +32,6 @@ import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.index.engine.exec.FileMetadata;
 import org.opensearch.index.engine.exec.coord.CatalogSnapshot;
-import org.opensearch.index.engine.exec.coord.CompositeEngineCatalogSnapshot;
-import org.opensearch.index.engine.exec.coord.SegmentInfosCatalogSnapshot;
 import org.opensearch.index.remote.RemoteStorePathStrategy;
 import org.opensearch.index.remote.RemoteStoreUtils;
 import org.opensearch.index.store.lockmanager.FileLockInfo;
@@ -817,41 +810,21 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
                 try (IndexOutput indexOutput = storeDirectory.createOutput(metadataFilename, IOContext.DEFAULT)) {
                     Map<String, String> uploadedSegments = new HashMap<>();
 
-                    if (catalogSnapshot instanceof SegmentInfosCatalogSnapshot) {
-                        // Non-optimized path: extract Lucene versions from SegmentInfos
-                        SegmentInfos segmentInfos = ((SegmentInfosCatalogSnapshot) catalogSnapshot).getSegmentInfos();
-                        Map<String, Integer> segmentToLuceneVersion = getSegmentToLuceneVersion(segmentFiles, segmentInfos);
-                        for (String file : segmentFiles) {
-                            if (segmentsUploadedToRemoteStore.containsKey(file)) {
-                                UploadedSegmentMetadata metadata = segmentsUploadedToRemoteStore.get(file);
-                                Integer luceneVersion = segmentToLuceneVersion.get(metadata.originalFilename);
-                                if (luceneVersion != null) {
-                                    metadata.setWrittenByMajor(luceneVersion);
-                                } else {
-                                    metadata.setWrittenByMajor(Version.LATEST.major);
-                                }
-                                uploadedSegments.put(file, metadata.toString());
-                            } else {
-                                throw new NoSuchFileException(file);
-                            }
-                        }
-                    } else {
-                        // Optimized (Composite) path: use Version.LATEST for all files
-                        for (String file : segmentFiles) {
-                            if (segmentsUploadedToRemoteStore.containsKey(file)) {
-                                UploadedSegmentMetadata metadata = segmentsUploadedToRemoteStore.get(file);
-                                metadata.setWrittenByMajor(Version.LATEST.major);
-                                uploadedSegments.put(file, metadata.toString());
-                            } else {
-                                throw new NoSuchFileException(file);
-                            }
+                    // Polymorphic dispatch — no instanceof checks needed.
+                    // Each CatalogSnapshot subclass knows how to resolve Lucene versions for its files.
+                    for (String file : segmentFiles) {
+                        if (segmentsUploadedToRemoteStore.containsKey(file)) {
+                            UploadedSegmentMetadata metadata = segmentsUploadedToRemoteStore.get(file);
+                            metadata.setWrittenByMajor(catalogSnapshot.getLuceneVersionForFile(metadata.originalFilename));
+                            uploadedSegments.put(file, metadata.toString());
+                        } else {
+                            throw new NoSuchFileException(file);
                         }
                     }
 
-                    // Serialize the SegmentInfos bytes for the metadata file
-                    byte[] segmentInfoSnapshotByteArray = serializeCatalogSnapshotToSegmentInfosBytes(
-                        catalogSnapshot, replicationCheckpoint
-                    );
+                    // Polymorphic dispatch — each CatalogSnapshot subclass knows how to serialize itself
+                    // to SegmentInfos bytes for the remote metadata file.
+                    byte[] segmentInfoSnapshotByteArray = catalogSnapshot.serializeToSegmentInfosBytes(replicationCheckpoint);
 
                     metadataStreamWrapper.writeStream(
                         indexOutput,
@@ -868,70 +841,6 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
                 tryAndDeleteLocalFile(metadataFilename, storeDirectory);
             }
         }
-    }
-
-    /**
-     * Serializes a CatalogSnapshot into SegmentInfos bytes for the remote metadata file.
-     *
-     * For SegmentInfosCatalogSnapshot: writes the actual SegmentInfos.
-     * For CompositeEngineCatalogSnapshot: creates a synthetic SegmentInfos with the CatalogSnapshot
-     * serialized into userData, so it can be reconstructed on recovery.
-     */
-    private byte[] serializeCatalogSnapshotToSegmentInfosBytes(
-        CatalogSnapshot catalogSnapshot,
-        ReplicationCheckpoint replicationCheckpoint
-    ) throws IOException {
-        SegmentInfos segmentInfosToSerialize;
-
-        if (catalogSnapshot instanceof SegmentInfosCatalogSnapshot) {
-            segmentInfosToSerialize = ((SegmentInfosCatalogSnapshot) catalogSnapshot).getSegmentInfos();
-        } else {
-            // Composite/optimized: create synthetic SegmentInfos with CatalogSnapshot embedded in userData
-            segmentInfosToSerialize = new SegmentInfos(Version.LATEST.major);
-            Map<String, String> userData = new HashMap<>(catalogSnapshot.getUserData());
-            userData.put(CatalogSnapshot.CATALOG_SNAPSHOT_KEY, catalogSnapshot.serializeToString());
-            segmentInfosToSerialize.setUserData(userData, false);
-            segmentInfosToSerialize.setNextWriteGeneration(replicationCheckpoint.getSegmentsGen());
-        }
-
-        ByteBuffersDataOutput byteBuffersIndexOutput = new ByteBuffersDataOutput();
-        segmentInfosToSerialize.write(
-            new ByteBuffersIndexOutput(byteBuffersIndexOutput, "Snapshot of SegmentInfos", "SegmentInfos")
-        );
-        return byteBuffersIndexOutput.toArrayCopy();
-    }
-
-    /**
-     * Parses the provided SegmentInfos to retrieve a mapping of the provided segment files to
-     * the respective Lucene major version that wrote the segments
-     *
-     * @param segmentFiles         List of segment files for which the Lucene major version is needed
-     * @param segmentInfosSnapshot SegmentInfos instance to parse
-     * @return Map of the segment file to its Lucene major version
-     */
-    private Map<String, Integer> getSegmentToLuceneVersion(Collection<String> segmentFiles, SegmentInfos segmentInfosSnapshot) {
-        Map<String, Integer> segmentToLuceneVersion = new HashMap<>();
-        for (SegmentCommitInfo segmentCommitInfo : segmentInfosSnapshot) {
-            SegmentInfo info = segmentCommitInfo.info;
-            Set<String> segFiles = info.files();
-            for (String file : segFiles) {
-                segmentToLuceneVersion.put(file, info.getVersion().major);
-            }
-        }
-
-        for (String file : segmentFiles) {
-            if (segmentToLuceneVersion.containsKey(file) == false) {
-                if (file.equals(segmentInfosSnapshot.getSegmentsFileName())) {
-                    segmentToLuceneVersion.put(file, segmentInfosSnapshot.getCommitLuceneVersion().major);
-                } else {
-                    // Fallback to the Lucene major version of the respective segment's .si file
-                    String segmentInfoFileName = RemoteStoreUtils.getSegmentName(file) + ".si";
-                    segmentToLuceneVersion.put(file, segmentToLuceneVersion.get(segmentInfoFileName));
-                }
-            }
-        }
-
-        return segmentToLuceneVersion;
     }
 
     /**

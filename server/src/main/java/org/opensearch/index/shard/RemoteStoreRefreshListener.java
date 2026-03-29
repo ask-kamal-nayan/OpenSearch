@@ -26,7 +26,6 @@ import org.opensearch.index.engine.exec.FileMetadata;
 import org.opensearch.index.engine.exec.bridge.Indexer;
 import org.opensearch.index.engine.exec.coord.CatalogSnapshot;
 import org.opensearch.index.engine.exec.coord.CompositeEngine;
-import org.opensearch.index.engine.exec.coord.SegmentInfosCatalogSnapshot;
 import org.opensearch.index.remote.RemoteSegmentTransferTracker;
 import org.opensearch.index.seqno.SequenceNumbers;
 import org.opensearch.index.store.CompositeStoreDirectory;
@@ -485,11 +484,9 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
         final Map<String, String> userData = new HashMap<>(segmentUserData);
         userData.put(LOCAL_CHECKPOINT_KEY, String.valueOf(maxSeqNo));
         userData.put(SequenceNumbers.MAX_SEQ_NO, Long.toString(maxSeqNo));
+        // Polymorphic dispatch — each CatalogSnapshot subclass handles setting userData
+        // including updating its internal state (e.g., SegmentInfos.userData for Lucene-backed snapshots)
         catalogSnapshotCloned.setUserData(userData, false);
-        // Setting segmentsInfos userData
-        if (catalogSnapshotCloned instanceof SegmentInfosCatalogSnapshot) {
-            ((SegmentInfosCatalogSnapshot) catalogSnapshotCloned).getSegmentInfos().userData = userData;
-        }
         Translog.TranslogGeneration translogGeneration = indexShard.getIndexer().translogManager().getTranslogGeneration();
         if (translogGeneration == null) {
             throw new UnsupportedOperationException("Encountered null TranslogGeneration while uploading metadata to remote segment store");

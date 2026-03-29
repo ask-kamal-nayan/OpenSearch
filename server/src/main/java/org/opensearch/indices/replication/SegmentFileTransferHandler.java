@@ -118,7 +118,8 @@ public final class SegmentFileTransferHandler {
                     if (shard.isOptimizedIndex()) {
                         CompositeStoreDirectory compositeDir = store.compositeStoreDirectory();
                         if (compositeDir != null) {
-                            FileMetadata fileMetadata = new FileMetadata(md.dataFormat(), md.name());
+                            // Derive format from md.name() which contains :::format for optimized indices
+                            FileMetadata fileMetadata = new FileMetadata(md.name());
                             indexInput = compositeDir.openInput(fileMetadata, IOContext.DEFAULT);
                         } else {
                             throw new IOException("CompositeStoreDirectory required but not available for optimized index file: " + md.name());

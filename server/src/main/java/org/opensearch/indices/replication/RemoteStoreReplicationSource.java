@@ -109,8 +109,7 @@ public class RemoteStoreReplicationSource implements SegmentReplicationSource {
                             e.getValue().getLength(),
                             Store.digestToString(Long.valueOf(e.getValue().getChecksum())),
                             version,
-                            null,
-                            new FileMetadata(e.getKey()).dataFormat()
+                            null
                         )
                     )
                 );

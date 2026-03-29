@@ -2067,8 +2067,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                     fileMetadata.file(),
                     fileLength,
                     Long.toString(checksum),
-                    Version.LATEST,
-                    fileMetadata.dataFormat()
+                    Version.LATEST
                 );
 
                 // Normalize directory to empty string for replication comparison
@@ -2355,8 +2354,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                     fileMetadata.file(),
                     length,
                     checksum,
-                    version,
-                    fileMetadata.dataFormat()
+                    version
                 );
                 combinedMetadata.put(fileMetadata.file(), storeFileMetadata);
             } catch (Exception e) {
@@ -2378,8 +2376,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                             file,
                             length,
                             checksum,
-                            version,
-                            "lucene"
+                            version
                         );
                         combinedMetadata.put(file, storeFileMetadata);
                     }

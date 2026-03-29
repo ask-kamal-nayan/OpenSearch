@@ -110,8 +110,8 @@ public class CheckpointInfoResponse extends TransportResponse {
             StoreFileMetadata storeMetadata = entry.getValue();
 
             // Use the dataFormat from StoreFileMetadata if available, otherwise default to "lucene"
-            String dataFormat = storeMetadata.dataFormat() != null ? storeMetadata.dataFormat() : "lucene";
-            FileMetadata fileMetadata = new FileMetadata(dataFormat, fileName);
+            // Derive format from filename which contains :::format for optimized indices
+            FileMetadata fileMetadata = new FileMetadata(fileName);
             formatAwareMap.put(fileMetadata, storeMetadata);
         }
         return formatAwareMap;

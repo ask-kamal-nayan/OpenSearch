@@ -161,6 +161,33 @@ public class CompositeStoreDirectory extends SubdirectoryAwareDirectory {
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // listAll() override — returns files in "file:::format" format
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * Lists all files in the composite directory, returning names in the
+     * {@code "file:::format"} serialized format (e.g., {@code "_0.cfs:::lucene"},
+     * {@code "_0_1.parquet:::parquet"}).
+     *
+     * <p>This provides a single consistent namespace for all callers.
+     * The inherited {@link #parseFilePath(String)} handles the reverse conversion
+     * from {@code ":::"} format back to filesystem paths for actual I/O.</p>
+     *
+     * @return array of file names in serialized FileMetadata format
+     * @throws IOException if listing fails
+     */
+    @Override
+    public String[] listAll() throws IOException {
+        String[] rawFiles = super.listAll();  // returns path-style from SubdirectoryAwareDirectory
+        String[] result = new String[rawFiles.length];
+        for (int i = 0; i < rawFiles.length; i++) {
+            FileMetadata fm = toFileMetadata(rawFiles[i]);  // "parquet/_0.parquet" → FileMetadata("parquet","_0.parquet")
+            result[i] = fm.serialize();                      // → "_0.parquet:::parquet"
+        }
+        return result;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // FileMetadata Parsing — bidirectional conversion between
     // path-style strings and structured FileMetadata objects
     // ═══════════════════════════════════════════════════════════════

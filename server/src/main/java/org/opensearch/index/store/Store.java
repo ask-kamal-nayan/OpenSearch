@@ -489,7 +489,7 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
 
                 // Compare normalized checksums
                 if (normalizedTargetChecksum.equals(sourceChecksum)
-                    && targetStoreMetadata.dataFormat().equals(sourceStoreMetadata.dataFormat())) {
+                    ) {
                     identical.add(sourceStoreMetadata);
                 } else {
                     different.add(sourceStoreMetadata);
@@ -975,7 +975,7 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
                     Version version = org.opensearch.Version.CURRENT.minimumIndexCompatibilityVersion().luceneVersion;
 
                     StoreFileMetadata diskMeta = new StoreFileMetadata(
-                        fileName, length, checksum, version, fileMetadata.dataFormat()
+                        fileName, length, checksum, version
                     );
                     combinedMetadata.put(fileName, diskMeta);
                 }
@@ -1449,7 +1449,7 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
                     // Create hash for small files only
                     BytesRef hash = createHashForSmallFiles(compositeDirectory, fileMetadata, length, logger);
 
-                    StoreFileMetadata storeFileMetadata = new StoreFileMetadata(fileName, length, checksum, version, hash, fileMetadata.dataFormat());
+                    StoreFileMetadata storeFileMetadata = new StoreFileMetadata(fileName, length, checksum, version, hash);
                     builder.put(fileName, storeFileMetadata);
 
                     // Track max version
