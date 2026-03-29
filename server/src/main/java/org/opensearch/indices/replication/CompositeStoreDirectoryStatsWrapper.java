@@ -46,7 +46,9 @@ public final class CompositeStoreDirectoryStatsWrapper extends SegmentReplicatio
      * This method is format-aware and uses callback-based progress tracking instead of FilterDirectory.
      */
     public void copyFrom(FileMetadata fileMetadata, RemoteSegmentStoreDirectory from, IOContext context) throws IOException {
-        String fileName = fileMetadata.file();
+        // Use serialize() to include the ":::format" suffix so the name matches
+        // what was registered via addFileDetail() in AbstractSegmentReplicationTarget.getFiles()
+        String fileName = fileMetadata.serialize();
 
         try {
             // Get file size for progress tracking
