@@ -35,7 +35,7 @@ import java.util.Objects;
 public class LuceneReaderManager implements EngineReaderManager<DirectoryReader> {
 
     private final DataFormat dataFormat;
-    private final Map<CatalogSnapshot, DirectoryReader> readers = new HashMap<>();
+    private final Map<CatalogSnapshot, DirectoryReader> readers;
     private volatile DirectoryReader currentReader;
 
     /**
@@ -45,10 +45,11 @@ public class LuceneReaderManager implements EngineReaderManager<DirectoryReader>
      * @param initialReader the initial DirectoryReader, must not be null
      * @throws NullPointerException if initialReader is null
      */
-    public LuceneReaderManager(DataFormat dataFormat, DirectoryReader initialReader) {
+    public LuceneReaderManager(DataFormat dataFormat, DirectoryReader initialReader, Map<CatalogSnapshot, DirectoryReader> readers) {
         this.dataFormat = dataFormat;
         Objects.requireNonNull(initialReader, "initialReader must not be null");
         this.currentReader = initialReader;
+        this.readers = readers;
     }
 
     @Override

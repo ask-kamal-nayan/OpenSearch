@@ -42,6 +42,9 @@ final class SyntheticSegmentInfos {
         segmentInfos.setUserData(userData, false);
         segmentInfos.setNextWriteGeneration(snapshot.getLastCommitGeneration());
 
+        for (String format: snapshot.getDataFormats()) {
+
+        }
         ByteBuffersDataOutput out = new ByteBuffersDataOutput();
         segmentInfos.write(new ByteBuffersIndexOutput(out, "DFA upload SegmentInfos", "DFA upload SegmentInfos"));
         return out.toArrayCopy();

@@ -488,11 +488,6 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
         userData.put(SequenceNumbers.MAX_SEQ_NO, Long.toString(maxSeqNo));
         catalogSnapshotCloned.setUserData(userData, false);
 
-        // Ask each registered FormatRecoveryCoordinator for its format-specific state.
-        // Collected into RemoteSegmentMetadata.formatStates; coordinators own per-format
-        // recovery validation (e.g. Lucene SegmentInfos roundtrip, parquet footer check).
-        Map<String, byte[]> formatStates = collectFormatStates(catalogSnapshotCloned);
-
         Translog.TranslogGeneration translogGeneration = indexShard.getIndexer().translogManager().getTranslogGeneration();
         if (translogGeneration == null) {
             throw new UnsupportedOperationException("Encountered null TranslogGeneration while uploading metadata to remote segment store");
@@ -505,46 +500,9 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
                 translogFileGeneration,
                 replicationCheckpoint,
                 indexShard.getNodeId(),
-                formatStates
+                indexShard.catalogSnapshotToRemoteMetadataSerializer()
             );
         }
-    }
-
-    /**
-     * Invokes each registered {@link org.opensearch.index.engine.exec.recovery.FormatRecoveryCoordinator}
-     * for formats present in the snapshot and returns a map of their captured state bytes. Coordinators
-     * returning {@code null} (no contribution) are skipped. A coordinator throwing fails the upload.
-     */
-    private Map<String, byte[]> collectFormatStates(CatalogSnapshot catalogSnapshot) throws IOException {
-        // Coordinator protocol is DFA-only. Non-DFA indices (SegmentInfosCatalogSnapshot) skip.
-        if (catalogSnapshot instanceof org.opensearch.index.engine.exec.coord.DataformatAwareCatalogSnapshot == false) {
-            return Map.of();
-        }
-        org.opensearch.index.engine.exec.recovery.FormatRecoveryRegistry registry = indexShard.getFormatRecoveryRegistry();
-        if (registry.all().isEmpty()) {
-            return Map.of();
-        }
-        org.opensearch.index.engine.exec.commit.Committer committer = null;
-        if (indexShard.getIndexer() instanceof DataFormatAwareEngine dfa) {
-            committer = dfa.getCommitter();
-        }
-        Map<String, byte[]> out = new HashMap<>();
-        for (org.opensearch.index.engine.exec.recovery.FormatRecoveryCoordinator c : registry.all()) {
-            if (catalogSnapshot.getDataFormats().contains(c.formatName()) == false) {
-                continue;
-            }
-            org.opensearch.index.engine.exec.recovery.UploadContext ctx = new org.opensearch.index.engine.exec.recovery.UploadContext(
-                catalogSnapshot,
-                storeDirectory,
-                c.formatName(),
-                committer
-            );
-            byte[] state = c.captureForUpload(ctx);
-            if (state != null) {
-                out.put(c.formatName(), state);
-            }
-        }
-        return out.isEmpty() ? Map.of() : Map.copyOf(out);
     }
 
     boolean isLowPriorityUpload() {

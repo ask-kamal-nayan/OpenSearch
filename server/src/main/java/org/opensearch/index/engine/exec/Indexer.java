@@ -144,6 +144,8 @@ public interface Indexer
      */
     GatedCloseable<CatalogSnapshot> acquireSnapshot();
 
+    byte[] serializeSnapshotToRemoteMetadata(CatalogSnapshot catalogSnapshot) throws IOException;
+
     /**
      * Acquires a safe index commit for snapshot or recovery operations.
      * The commit is guaranteed to be consistent and will not be deleted while held.

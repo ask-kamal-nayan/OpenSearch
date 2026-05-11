@@ -6210,6 +6210,14 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         return getIndexer().acquireSnapshot();
     }
 
+    public CheckedFunction<CatalogSnapshot, byte[], IOException> catalogSnapshotToRemoteMetadataSerializer() {
+        return cs -> getIndexer().serializeSnapshotToRemoteMetadata(cs);
+    }
+
+    public GatedCloseable<IndexReaderProvider.Reader> acquireReader() throws IOException {
+        return getIndexer().acquireReader();
+    }
+
     private TimeValue getRemoteTranslogUploadBufferInterval(Supplier<TimeValue> clusterRemoteTranslogBufferIntervalSupplier) {
         assert Objects.nonNull(clusterRemoteTranslogBufferIntervalSupplier) : "remote translog buffer interval supplier is null";
         if (indexSettings().isRemoteTranslogBufferIntervalExplicit()) {

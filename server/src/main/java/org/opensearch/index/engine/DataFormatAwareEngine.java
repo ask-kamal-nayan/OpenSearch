@@ -1399,6 +1399,10 @@ public class DataFormatAwareEngine implements Indexer {
         }
     }
 
+    public byte[] serializeSnapshotToRemoteMetadata(CatalogSnapshot catalogSnapshot) throws IOException {
+        return catalogSnapshotManager.serializeToCommitFormat(catalogSnapshot);
+    }
+
     /**
      * Closes the engine, releasing all resources including the indexing execution engine,
      * translog manager, reader managers, and store reference.

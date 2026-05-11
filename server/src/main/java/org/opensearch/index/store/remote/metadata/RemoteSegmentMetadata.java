@@ -61,11 +61,6 @@ public class RemoteSegmentMetadata {
 
     private final ReplicationCheckpoint replicationCheckpoint;
 
-    /**
-     * Typed DFA payload carrying serialized catalog + per-format recovery state. {@code null}
-     * for non-DFA indices and for v1/v2 legacy metadata.
-     */
-    private final DfaRecoveryPayload dfaPayload;
 
     /**
      * Backwards-compatible constructor — produces metadata with no DFA payload (i.e. a non-DFA
@@ -76,23 +71,9 @@ public class RemoteSegmentMetadata {
         byte[] segmentInfosBytes,
         ReplicationCheckpoint replicationCheckpoint
     ) {
-        this(metadata, segmentInfosBytes, replicationCheckpoint, null);
-    }
-
-    /**
-     * Full constructor. Pass a non-null {@code dfaPayload} for DataFormat-aware uploads.
-     * For DFA, callers should pass empty {@code segmentInfosBytes}.
-     */
-    public RemoteSegmentMetadata(
-        Map<String, RemoteSegmentStoreDirectory.UploadedSegmentMetadata> metadata,
-        byte[] segmentInfosBytes,
-        ReplicationCheckpoint replicationCheckpoint,
-        DfaRecoveryPayload dfaPayload
-    ) {
         this.metadata = metadata;
         this.segmentInfosBytes = segmentInfosBytes;
         this.replicationCheckpoint = replicationCheckpoint;
-        this.dfaPayload = dfaPayload;
     }
 
     /**

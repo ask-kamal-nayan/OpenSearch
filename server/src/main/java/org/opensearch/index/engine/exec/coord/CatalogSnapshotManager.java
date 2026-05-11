@@ -10,6 +10,7 @@ package org.opensearch.index.engine.exec.coord;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.opensearch.common.CheckedFunction;
 import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.common.concurrent.GatedCloseable;
 import org.opensearch.common.concurrent.GatedConditionalCloseable;
@@ -34,6 +35,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Function;
 
 /**
  * Manages the lifecycle of {@link CatalogSnapshot} instances for the composite multi-format engine
@@ -57,6 +59,7 @@ public class CatalogSnapshotManager implements Closeable {
     private final IndexFileDeleter indexFileDeleter;
     private final CatalogSnapshotDeletionPolicy deletionPolicy;
     private final List<CatalogSnapshotLifecycleListener> snapshotListeners;
+    private final CheckedFunction<CatalogSnapshot, byte[], IOException> snapshotSerializer;
 
     /**
      * Creates a new {@link DataformatAwareCatalogSnapshot} for use in tests.
@@ -118,6 +121,7 @@ public class CatalogSnapshotManager implements Closeable {
             shardPath,
             commitFileManager
         );
+        this.snapshotSerializer = commitFileManager::serializeToCommitFormat;
     }
 
     /**
@@ -345,6 +349,10 @@ public class CatalogSnapshotManager implements Closeable {
         // Release the manager's own reference to the old snapshot.
         // The snapshot won't be deleted if the commit path still holds a reference.
         decRefAndMaybeDelete(oldSnapshot);
+    }
+
+    public byte[] serializeToCommitFormat(CatalogSnapshot catalogSnapshot) throws IOException {
+        return snapshotSerializer.apply(catalogSnapshot);
     }
 
     /**

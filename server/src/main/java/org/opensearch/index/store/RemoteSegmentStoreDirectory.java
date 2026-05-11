@@ -25,6 +25,7 @@ import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.util.Version;
 import org.opensearch.cluster.metadata.CryptoMetadata;
+import org.opensearch.common.CheckedFunction;
 import org.opensearch.common.Nullable;
 import org.opensearch.common.UUIDs;
 import org.opensearch.common.annotation.InternalApi;
@@ -44,7 +45,6 @@ import org.opensearch.index.store.lockmanager.RemoteStoreCommitLevelLockManager;
 import org.opensearch.index.store.lockmanager.RemoteStoreLockManager;
 import org.opensearch.index.store.lockmanager.RemoteStoreMetadataLockManager;
 import org.opensearch.index.store.remote.FormatBlobRouter;
-import org.opensearch.index.store.remote.metadata.DfaRecoveryPayload;
 import org.opensearch.index.store.remote.metadata.RemoteSegmentMetadata;
 import org.opensearch.index.store.remote.metadata.RemoteSegmentMetadataHandlerFactory;
 import org.opensearch.indices.replication.checkpoint.ReplicationCheckpoint;
@@ -857,7 +857,7 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
         long translogGeneration,
         ReplicationCheckpoint replicationCheckpoint,
         String nodeId,
-        Map<String, byte[]> formatStates
+        CheckedFunction<CatalogSnapshot, byte[], IOException> catalogSnapshotToCommitSerializer
     ) throws IOException {
         synchronized (this) {
             String metadataFilename = MetadataFilenameUtils.getMetadataFilename(
@@ -883,27 +883,13 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
                         }
                     }
 
-                    final byte[] segmentInfoBytes;
-                    final DfaRecoveryPayload dfaPayload;
-                    if (catalogSnapshot instanceof DataformatAwareCatalogSnapshot dfa) {
-                        segmentInfoBytes = dfa.serialize();            // Lucene envelope (for segrep)
-                        dfaPayload = new DfaRecoveryPayload(
-                            dfa.serializeCatalogBytes(),               // raw catalog bytes
-                            dfa.getLastCommitGeneration(),
-                            formatStates == null ? Map.of() : formatStates
-                        );
-                    } else {
-                        segmentInfoBytes = catalogSnapshot.serialize();
-                        dfaPayload = null;
-                    }
-
+                    final byte[] segmentInfoBytes = catalogSnapshotToCommitSerializer.apply(catalogSnapshot);
                     metadataStreamWrapper.writeStream(
                         indexOutput,
                         new RemoteSegmentMetadata(
                             RemoteSegmentMetadata.fromMapOfStrings(uploadedSegments),
                             segmentInfoBytes,
-                            replicationCheckpoint,
-                            dfaPayload
+                            replicationCheckpoint
                         )
                     );
                 }
@@ -924,7 +910,7 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
         ReplicationCheckpoint replicationCheckpoint,
         String nodeId
     ) throws IOException {
-        uploadMetadata(segmentFiles, catalogSnapshot, storeDirectory, translogGeneration, replicationCheckpoint, nodeId, Map.of());
+        uploadMetadata(segmentFiles, catalogSnapshot, storeDirectory, translogGeneration, replicationCheckpoint, nodeId, a -> new byte[0]);
     }
 
     // TODO: When RemoteStoreRefreshListener is migrated to use CatalogSnapshot-based uploadMetadata,

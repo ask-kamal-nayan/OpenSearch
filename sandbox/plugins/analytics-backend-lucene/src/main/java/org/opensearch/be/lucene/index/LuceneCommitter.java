@@ -17,6 +17,9 @@ import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.NoMergePolicy;
 import org.apache.lucene.index.SegmentInfos;
+import org.apache.lucene.index.StandardDirectoryReader;
+import org.apache.lucene.store.ByteBuffersDataOutput;
+import org.apache.lucene.store.ByteBuffersIndexOutput;
 import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.index.engine.CommitStats;
 import org.opensearch.index.engine.EngineConfig;
@@ -37,6 +40,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -70,6 +74,7 @@ public class LuceneCommitter extends SafeBootstrapCommitter {
     private final IndexWriter indexWriter;
     private final LuceneCommitDeletionPolicy deletionPolicy;
     private final AtomicBoolean isClosed = new AtomicBoolean();
+    private final Map<CatalogSnapshot, DirectoryReader> readers = new ConcurrentHashMap<>();
 
     /**
      * Creates a new LuceneCommitter. Trims unsafe commits (via {@link SafeBootstrapCommitter}),
@@ -221,6 +226,11 @@ public class LuceneCommitter extends SafeBootstrapCommitter {
         return indexWriter;
     }
 
+    Map<CatalogSnapshot, DirectoryReader> readers() {
+        ensureOpen();
+        return readers;
+    }
+
     // --- Internal ---
 
     private IndexWriterConfig createIndexWriterConfig(EngineConfig engineConfig) {
@@ -253,6 +263,8 @@ public class LuceneCommitter extends SafeBootstrapCommitter {
             throw new IllegalStateException("LuceneCommitter is closed");
         }
     }
+
+
 
     // --- SafeBootstrapCommitter abstract method ---
 
@@ -290,6 +302,20 @@ public class LuceneCommitter extends SafeBootstrapCommitter {
             tempWriter.setLiveCommitData(targetCommit.getUserData().entrySet());
             tempWriter.commit();
         }
+    }
+
+    @Override
+    public byte[] serializeToCommitFormat(CatalogSnapshot catalogSnapshot) throws IOException {
+        ByteBuffersDataOutput out = new ByteBuffersDataOutput();
+        SegmentInfos sis = ((StandardDirectoryReader) readers.get(catalogSnapshot)).getSegmentInfos().clone();
+        // assert that sis and catalogsnapshot have same lucene files.
+        Map<String, String> userData = new HashMap<>(catalogSnapshot.getUserData());
+        userData.put(CatalogSnapshot.CATALOG_SNAPSHOT_KEY, catalogSnapshot.serializeToString());
+        sis.setUserData(userData, false);
+        sis.setNextWriteGeneration(catalogSnapshot.getLastCommitGeneration());
+        // assert before cast
+        sis.write(new ByteBuffersIndexOutput(out, "DFA upload SegmentInfos", "DFA upload SegmentInfos"));
+        return out.toArrayCopy();
     }
 
     /**

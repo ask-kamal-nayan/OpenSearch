@@ -70,6 +70,7 @@ import org.opensearch.search.suggest.completion.CompletionStats;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.io.UnsupportedEncodingException;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
@@ -929,6 +930,11 @@ public class DataFormatAwareNRTReplicationEngine implements Indexer {
         } else {
             logger.debug(() -> new ParameterizedMessage("tried to fail engine but could not acquire lock [{}]", reason), failure);
         }
+    }
+
+    @Override
+    public byte[] serializeSnapshotToRemoteMetadata(CatalogSnapshot catalogSnapshot) throws IOException {
+        throw new UnsupportedEncodingException();
     }
 
     private void awaitPendingClose() {

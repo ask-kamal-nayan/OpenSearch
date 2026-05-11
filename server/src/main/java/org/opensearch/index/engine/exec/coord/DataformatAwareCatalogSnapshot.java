@@ -10,6 +10,7 @@ package org.opensearch.index.engine.exec.coord;
 
 import org.apache.lucene.index.SegmentInfos;
 import org.apache.lucene.util.Version;
+import org.opensearch.common.CheckedFunction;
 import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.common.io.stream.BytesStreamOutput;
 import org.opensearch.core.common.bytes.BytesReference;
@@ -49,26 +50,9 @@ public class DataformatAwareCatalogSnapshot extends CatalogSnapshot {
     private final AtomicBoolean closed = new AtomicBoolean(false);
     private String lastCommitFileName;
     private long lastCommitGeneration = -1;
+    private final CheckedFunction<CatalogSnapshot, byte[], IOException> serializer;
 
-    /**
-     * Lucene recovery-coordinator state bytes captured atomically at the same instant as
-     * {@link #segments} during the refresh that produced this snapshot. Read by the Lucene
-     * recovery coordinator at upload time so the state shipped to replicas/remote-store is
-     * strictly consistent with {@link #segments}.
-     *
-     * <p>Bytes are in the coordinator's opaque state layout (generation prefix + SegmentInfos
-     * with footer checksum, all written through a single IndexOutput). Must be passed through
-     * verbatim — do not re-wrap or slice, as that would invalidate the footer checksum.
-     *
-     * <p>{@code null} when no Lucene engine participated in the refresh (parquet-only DFA) or
-     * when the snapshot was reloaded from a commit on startup (fallback to
-     * {@code committer.captureInMemorySegmentInfos()} is safe there — the {@code IndexWriter}
-     * matches the on-disk commit).
-     *
-     * <p>Not serialized — this is an in-memory field that exists only for the lifetime of a
-     * refresh cycle. {@link #writeTo} and {@link #deserialize} ignore it.
-     */
-    private final byte[] luceneSegmentInfosBytes;
+
 
     /**
      * Constructs a new DataformatAwareCatalogSnapshot.
@@ -86,38 +70,13 @@ public class DataformatAwareCatalogSnapshot extends CatalogSnapshot {
         long version,
         List<Segment> segments,
         long lastWriterGeneration,
-        Map<String, String> userData
+        Map<String, String> userData,
+        CheckedFunction<CatalogSnapshot, byte[], IOException> serializer
     ) {
-        this(id, generation, version, segments, lastWriterGeneration, userData, null, -1, null);
+        this(id, generation, version, segments, lastWriterGeneration, userData, null, -1, null, serializer);
     }
 
-    /**
-     * Constructs a new DataformatAwareCatalogSnapshot carrying forward the last committed segments file name.
-     * <p>
-     * This constructor ensures that the {@code segmentsFileName} from a prior flush is preserved
-     * across refreshes and merges, which would otherwise create new snapshots without it.
-     *
-     * @param id the unique snapshot identifier
-     * @param generation the monotonically increasing generation number
-     * @param version the schema version for serialization compatibility
-     * @param segments the list of segments in this snapshot
-     * @param lastWriterGeneration the generation of the last writer that contributed to this snapshot
-     * @param userData user-defined metadata key-value pairs
-     * @param lastCommittedFileName the segments_N file name from the most recent flush, or null
-     * @param lastCommitGeneration the Lucene generation of the most recent commit, or -1
-     */
-    DataformatAwareCatalogSnapshot(
-        long id,
-        long generation,
-        long version,
-        List<Segment> segments,
-        long lastWriterGeneration,
-        Map<String, String> userData,
-        String lastCommittedFileName,
-        long lastCommitGeneration
-    ) {
-        this(id, generation, version, segments, lastWriterGeneration, userData, lastCommittedFileName, lastCommitGeneration, null);
-    }
+
 
     /**
      * Full constructor accepting the atomically captured Lucene coordinator state bytes.
@@ -132,7 +91,7 @@ public class DataformatAwareCatalogSnapshot extends CatalogSnapshot {
         Map<String, String> userData,
         String lastCommittedFileName,
         long lastCommitGeneration,
-        byte[] luceneSegmentInfosBytes
+        CheckedFunction<CatalogSnapshot, byte[], IOException> serializer
     ) {
         super("dataformat_aware_catalog_snapshot", generation, version);
         this.id = id;
@@ -142,7 +101,7 @@ public class DataformatAwareCatalogSnapshot extends CatalogSnapshot {
         this.userData = Map.copyOf(userData);
         this.lastCommitFileName = lastCommittedFileName;
         this.lastCommitGeneration = lastCommitGeneration;
-        this.luceneSegmentInfosBytes = luceneSegmentInfosBytes;
+        this.serializer = serializer;
     }
 
     /**
@@ -167,7 +126,7 @@ public class DataformatAwareCatalogSnapshot extends CatalogSnapshot {
         }
         this.segments = Collections.unmodifiableList(segmentList);
         this.numDocs = computeNumDocs(this.segments);
-        this.luceneSegmentInfosBytes = null;  // not serialized; populated only on live refresh path
+        this.serializer = null;  // not serialized; populated only on live refresh path
     }
 
     @Override

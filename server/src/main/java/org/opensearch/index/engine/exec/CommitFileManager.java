@@ -41,4 +41,6 @@ public interface CommitFileManager {
      * @param fileName the file name to check
      */
     boolean isCommitManagedFile(String fileName);
+
+    default byte[] serializeToCommitFormat(CatalogSnapshot catalogSnapshot)  throws IOException {return new byte[0];}
 }
