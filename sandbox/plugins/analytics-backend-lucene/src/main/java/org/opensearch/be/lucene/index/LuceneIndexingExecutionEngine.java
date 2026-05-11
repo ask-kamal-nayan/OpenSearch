@@ -238,6 +238,8 @@ public class LuceneIndexingExecutionEngine implements IndexingExecutionEngine<Lu
             // so the original temp directory file names are no longer valid.
             Path sharedDir = store.shardPath().resolveIndex();
 
+            byte[] luceneBytes = null;
+            long luceneGeneration = -1L;
             try (DirectoryReader reader = DirectoryReader.open(sharedWriter)) {
                 List<LeafReaderContext> leaves = reader.leaves();
 
@@ -269,8 +271,43 @@ public class LuceneIndexingExecutionEngine implements IndexingExecutionEngine<Lu
                         writerGenerations.remove(writerGen);
                     }
                 }
+
+                // Atomic Lucene state capture — taken from the SAME reader used to enumerate
+                // files above. Guarantees the bytes describe exactly the Lucene state whose
+                // files ended up in the result segments.
+                //
+                // The bytes are pre-packaged in the LuceneFormatRecoveryCoordinator's state
+                // layout: [generation:long][SegmentInfos bytes with footer checksum]. Writing
+                // both the generation prefix and SegmentInfos within a SINGLE IndexOutput
+                // ensures the footer's CRC32 checksum is computed over the entire blob — so
+                // readers validating over a ChecksumIndexInput that also starts at byte 0 get
+                // a matching checksum.
+                //
+                // IMPORTANT: do NOT close the IndexOutput before calling toArrayCopy(). Lucene's
+                // ByteBuffersIndexOutput.close() can alter buffer state in a way that invalidates
+                // the checksum footer just written.
+                //
+                // LuceneFormatRecoveryCoordinator.captureForUpload returns these bytes verbatim
+                // (no re-wrapping), which preserves checksum integrity end-to-end.
+                if (reader instanceof org.apache.lucene.index.StandardDirectoryReader sdr) {
+                    org.apache.lucene.index.SegmentInfos infos = sdr.getSegmentInfos();
+                    if (infos != null) {
+                        org.apache.lucene.index.SegmentInfos cloned = infos.clone();
+                        org.apache.lucene.store.ByteBuffersDataOutput out = new org.apache.lucene.store.ByteBuffersDataOutput();
+                        org.apache.lucene.store.ByteBuffersIndexOutput idx = new org.apache.lucene.store.ByteBuffersIndexOutput(
+                            out,
+                            "lucene-atomic-state",
+                            "lucene-atomic-state"
+                        );
+                        idx.writeLong(cloned.getGeneration());
+                        cloned.write(idx);   // writes header + segments + footer checksum
+                        luceneBytes = out.toArrayCopy();
+                    }
+                }
             }
             assert writerGenerations.isEmpty() : "Could not get segments from all writers";
+
+            return new RefreshResult(List.copyOf(resultSegments), luceneBytes);
         }
 
         return new RefreshResult(List.copyOf(resultSegments));

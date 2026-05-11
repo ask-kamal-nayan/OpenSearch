@@ -784,7 +784,7 @@ public class DataFormatAwareEngine implements Indexer {
                                     + " but got "
                                     + result.refreshedSegments().size();
 
-                            catalogSnapshotManager.commitNewSnapshot(result.refreshedSegments());
+                            catalogSnapshotManager.commitNewSnapshot(result.refreshedSegments(), result.luceneSegmentInfosBytes());
                         }
                         notifyRefreshListenersAfter(refreshed);
                     } finally {
@@ -1358,14 +1358,10 @@ public class DataFormatAwareEngine implements Indexer {
 
     }
 
-    /**
-     * Captures the committer's Lucene in-memory {@link org.apache.lucene.index.SegmentInfos}
-     * for the remote-store upload path. Returns {@code null} if the committer has no Lucene
-     * in-memory state.
-     */
-    public org.apache.lucene.index.SegmentInfos captureInMemoryLuceneSegmentInfos() throws IOException {
+    /** Returns the engine's committer. Used by recovery coordinators to access format-specific state. */
+    public org.opensearch.index.engine.exec.commit.Committer getCommitter() {
         ensureOpen();
-        return committer.captureInMemorySegmentInfos();
+        return committer;
     }
 
     /**

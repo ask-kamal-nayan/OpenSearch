@@ -204,6 +204,16 @@ public class CatalogSnapshotManager implements Closeable {
      * @param refreshedSegments the segments produced by the latest refresh
      */
     public synchronized void commitNewSnapshot(List<Segment> refreshedSegments) throws IOException {
+        commitNewSnapshot(refreshedSegments, null);
+    }
+
+    /**
+     * Refresh entry point that accepts atomically-captured Lucene coordinator state bytes to
+     * attach to the new snapshot. Passing {@code null} preserves the previous snapshot's
+     * bytes (carry-forward — correct for parquet-only merges where Lucene files are unchanged).
+     * Passing non-null bytes replaces the previous bytes.
+     */
+    public synchronized void commitNewSnapshot(List<Segment> refreshedSegments, byte[] luceneSegmentInfosBytes) throws IOException {
         if (closed.get()) {
             throw new IllegalStateException("CatalogSnapshotManager is closed");
         }
@@ -216,6 +226,13 @@ public class CatalogSnapshotManager implements Closeable {
             listener.beforeRefresh();
         }
 
+        // Carry-forward policy: if no new Lucene bytes provided (e.g. parquet-only merge),
+        // inherit the previous snapshot's bytes so LuceneCoord still sees a consistent pair.
+        byte[] effectiveLuceneBytes = luceneSegmentInfosBytes;
+        if (effectiveLuceneBytes == null && latestCatalogSnapshot instanceof DataformatAwareCatalogSnapshot dfa) {
+            effectiveLuceneBytes = dfa.getLuceneSegmentInfosBytes();
+        }
+
         DataformatAwareCatalogSnapshot newSnapshot;
         try {
             newSnapshot = new DataformatAwareCatalogSnapshot(
@@ -226,7 +243,8 @@ public class CatalogSnapshotManager implements Closeable {
                 latestCatalogSnapshot.getLastWriterGeneration() + 1,
                 latestCatalogSnapshot.getUserData(),
                 latestCatalogSnapshot.getLastCommitFileName(),
-                latestCatalogSnapshot.getLastCommitGeneration()
+                latestCatalogSnapshot.getLastCommitGeneration(),
+                effectiveLuceneBytes
             );
         } catch (Exception e) {
             // Construction failed (e.g., OOM) — notify listeners that the refresh did not produce a new snapshot

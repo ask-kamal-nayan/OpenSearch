@@ -38,6 +38,7 @@ public class RemoteSegmentMetadataHandlerFactory implements IndexIOStreamHandler
         return switch (version) {
             case RemoteSegmentMetadata.VERSION_ONE -> new RemoteSegmentMetadataHandler(RemoteSegmentMetadata.VERSION_ONE);
             case RemoteSegmentMetadata.VERSION_TWO -> new RemoteSegmentMetadataHandler(RemoteSegmentMetadata.VERSION_TWO);
+            case RemoteSegmentMetadata.VERSION_THREE -> new RemoteSegmentMetadataHandler(RemoteSegmentMetadata.VERSION_THREE);
             default -> throw new IllegalArgumentException("Unsupported RemoteSegmentMetadata version: " + version);
         };
     }

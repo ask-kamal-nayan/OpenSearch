@@ -220,7 +220,20 @@ public class CompositeIndexingExecutionEngine implements IndexingExecutionEngine
             merged.add(builder.build());
         }
 
-        return new RefreshResult(merged);
+        // Propagate Lucene state bytes from whichever per-format engine produced them.
+        // Exactly one engine (primary OR secondary) is Lucene in the DFA composite, so either
+        // the primary result or one secondary's result will carry bytes; the others return null.
+        byte[] luceneBytes = primary.luceneSegmentInfosBytes();
+        if (luceneBytes == null) {
+            for (RefreshResult secResult : secResults) {
+                if (secResult.luceneSegmentInfosBytes() != null) {
+                    luceneBytes = secResult.luceneSegmentInfosBytes();
+                    break;
+                }
+            }
+        }
+
+        return new RefreshResult(merged, luceneBytes);
     }
 
     private void buildSegment(RefreshResult primary, Map<Long, Segment.Builder> mergedByGen) {

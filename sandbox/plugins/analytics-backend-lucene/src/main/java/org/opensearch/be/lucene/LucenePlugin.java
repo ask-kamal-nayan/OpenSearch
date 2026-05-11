@@ -112,6 +112,21 @@ public class LucenePlugin extends Plugin implements DataFormatPlugin, SearchBack
         return LuceneSearchBackEnd.createReaderManager(settings);
     }
 
+    // --- DataFormatPlugin recovery hook ---
+
+    /**
+     * Registers the Lucene recovery coordinator. Captures the {@code IndexWriter} in-memory
+     * {@link org.apache.lucene.index.SegmentInfos} at upload time so recovery can restore
+     * {@code segments_N} with real segment references.
+     */
+    @Override
+    public org.opensearch.index.engine.exec.recovery.FormatRecoveryCoordinator getRecoveryCoordinator() {
+        return LUCENE_RECOVERY_COORDINATOR;
+    }
+
+    private static final org.opensearch.index.engine.exec.recovery.FormatRecoveryCoordinator LUCENE_RECOVERY_COORDINATOR =
+        new org.opensearch.be.lucene.recovery.LuceneFormatRecoveryCoordinator();
+
     // --- EnginePlugin ---
 
     /**

@@ -115,11 +115,19 @@ public class DataFormatAwareUploadIT extends RemoteStoreBaseIntegTestCase {
             assertFalse("expected uploaded segments, got empty map", uploaded.isEmpty());
             assertTrue("expected parquet in uploaded formats, got " + formatsOf(uploaded), formatsOf(uploaded).contains("parquet"));
 
-            // Remote metadata file round-trip: non-null, non-empty SegmentInfos bytes, has ReplicationCheckpoint.
+            // Remote metadata file round-trip: non-null, DFA payload present, has ReplicationCheckpoint.
             RemoteSegmentMetadata metadata = primary.getRemoteDirectory().readLatestMetadataFile();
             assertNotNull("expected metadata file", metadata);
+            // Phase 3: DFA uploads carry the catalog + per-format state in a typed DfaRecoveryPayload.
+            // segmentInfosBytes additionally carries a Lucene envelope (catalog in userData) for
+            // Segment Replication interop.
+            assertNotNull("expected non-null DfaRecoveryPayload for DFA index", metadata.getDfaPayload());
             assertTrue(
-                "expected non-empty SegmentInfos bytes",
+                "expected non-empty catalog bytes in DfaRecoveryPayload",
+                metadata.getDfaPayload().getCatalogSnapshotBytes().length > 0
+            );
+            assertTrue(
+                "expected non-empty segmentInfosBytes envelope",
                 metadata.getSegmentInfosBytes() != null && metadata.getSegmentInfosBytes().length > 0
             );
             assertNotNull("expected non-null ReplicationCheckpoint", metadata.getReplicationCheckpoint());
@@ -160,8 +168,8 @@ public class DataFormatAwareUploadIT extends RemoteStoreBaseIntegTestCase {
                 RemoteSegmentMetadata metadata = primary.getRemoteDirectory().readLatestMetadataFile();
                 assertNotNull("expected metadata at cycle " + iteration, metadata);
                 assertTrue(
-                    "expected non-empty SegmentInfos bytes at cycle " + iteration,
-                    metadata.getSegmentInfosBytes() != null && metadata.getSegmentInfosBytes().length > 0
+                    "expected DFA payload at cycle " + iteration,
+                    metadata.getDfaPayload() != null && metadata.getDfaPayload().getCatalogSnapshotBytes().length > 0
                 );
                 long version = metadata.getReplicationCheckpoint().getSegmentInfosVersion();
                 assertTrue(

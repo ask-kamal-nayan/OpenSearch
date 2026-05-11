@@ -38,7 +38,7 @@ public class RemoteSegmentMetadataHandlerFactoryTests extends OpenSearchTestCase
     }
 
     public void testGetHandlerWhenHandlerNotProvidedThrowsException() {
-        Throwable throwable = assertThrows(IllegalArgumentException.class, () -> { segmentMetadataHandlerFactory.getHandler(3); });
-        assertEquals("Unsupported RemoteSegmentMetadata version: 3", throwable.getMessage());
+        Throwable throwable = assertThrows(IllegalArgumentException.class, () -> { segmentMetadataHandlerFactory.getHandler(4); });
+        assertEquals("Unsupported RemoteSegmentMetadata version: 4", throwable.getMessage());
     }
 }

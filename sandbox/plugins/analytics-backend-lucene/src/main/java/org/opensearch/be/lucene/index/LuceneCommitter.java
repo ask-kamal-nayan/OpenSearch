@@ -129,7 +129,6 @@ public class LuceneCommitter extends SafeBootstrapCommitter {
      * commit. Used by the remote-store upload path to keep real Lucene segment references
      * in the uploaded metadata.
      */
-    @Override
     public SegmentInfos captureInMemorySegmentInfos() throws IOException {
         ensureOpen();
         try (DirectoryReader reader = DirectoryReader.open(indexWriter)) {

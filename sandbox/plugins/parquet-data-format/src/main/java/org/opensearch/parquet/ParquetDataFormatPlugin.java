@@ -134,4 +134,16 @@ public class ParquetDataFormatPlugin extends Plugin implements DataFormatPlugin 
             )
         );
     }
+
+    /**
+     * Registers the Parquet recovery coordinator. Validates parquet file counts and footer magic
+     * bytes on recovery; fails fast on corruption or mismatch.
+     */
+    @Override
+    public org.opensearch.index.engine.exec.recovery.FormatRecoveryCoordinator getRecoveryCoordinator() {
+        return PARQUET_RECOVERY_COORDINATOR;
+    }
+
+    private static final org.opensearch.index.engine.exec.recovery.FormatRecoveryCoordinator PARQUET_RECOVERY_COORDINATOR =
+        new org.opensearch.parquet.recovery.ParquetFormatRecoveryCoordinator();
 }

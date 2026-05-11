@@ -141,19 +141,19 @@ public class DataFormatAwareReplicationIT extends RemoteStoreBaseIntegTestCase {
             assertNotNull("primary metadata", pMeta);
             assertNotNull("replica metadata", rMeta);
 
-            // Checkpoint version + non-empty SegmentInfos bytes.
+            // Checkpoint version + DFA payload present.
             assertEquals(
                 "primary/replica checkpoint versions must match",
                 pMeta.getReplicationCheckpoint().getSegmentInfosVersion(),
                 rMeta.getReplicationCheckpoint().getSegmentInfosVersion()
             );
             assertTrue(
-                "primary SegmentInfos bytes non-empty",
-                pMeta.getSegmentInfosBytes() != null && pMeta.getSegmentInfosBytes().length > 0
+                "primary DFA payload present",
+                pMeta.getDfaPayload() != null && pMeta.getDfaPayload().getCatalogSnapshotBytes().length > 0
             );
             assertTrue(
-                "replica SegmentInfos bytes non-empty",
-                rMeta.getSegmentInfosBytes() != null && rMeta.getSegmentInfosBytes().length > 0
+                "replica DFA payload present",
+                rMeta.getDfaPayload() != null && rMeta.getDfaPayload().getCatalogSnapshotBytes().length > 0
             );
 
             // Data-format set must agree and include the primary format (parquet).

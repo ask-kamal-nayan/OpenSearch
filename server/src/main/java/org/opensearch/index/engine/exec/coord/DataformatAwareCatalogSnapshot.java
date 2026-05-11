@@ -51,6 +51,26 @@ public class DataformatAwareCatalogSnapshot extends CatalogSnapshot {
     private long lastCommitGeneration = -1;
 
     /**
+     * Lucene recovery-coordinator state bytes captured atomically at the same instant as
+     * {@link #segments} during the refresh that produced this snapshot. Read by the Lucene
+     * recovery coordinator at upload time so the state shipped to replicas/remote-store is
+     * strictly consistent with {@link #segments}.
+     *
+     * <p>Bytes are in the coordinator's opaque state layout (generation prefix + SegmentInfos
+     * with footer checksum, all written through a single IndexOutput). Must be passed through
+     * verbatim — do not re-wrap or slice, as that would invalidate the footer checksum.
+     *
+     * <p>{@code null} when no Lucene engine participated in the refresh (parquet-only DFA) or
+     * when the snapshot was reloaded from a commit on startup (fallback to
+     * {@code committer.captureInMemorySegmentInfos()} is safe there — the {@code IndexWriter}
+     * matches the on-disk commit).
+     *
+     * <p>Not serialized — this is an in-memory field that exists only for the lifetime of a
+     * refresh cycle. {@link #writeTo} and {@link #deserialize} ignore it.
+     */
+    private final byte[] luceneSegmentInfosBytes;
+
+    /**
      * Constructs a new DataformatAwareCatalogSnapshot.
      *
      * @param id the unique snapshot identifier
@@ -68,7 +88,7 @@ public class DataformatAwareCatalogSnapshot extends CatalogSnapshot {
         long lastWriterGeneration,
         Map<String, String> userData
     ) {
-        this(id, generation, version, segments, lastWriterGeneration, userData, null, -1);
+        this(id, generation, version, segments, lastWriterGeneration, userData, null, -1, null);
     }
 
     /**
@@ -96,6 +116,24 @@ public class DataformatAwareCatalogSnapshot extends CatalogSnapshot {
         String lastCommittedFileName,
         long lastCommitGeneration
     ) {
+        this(id, generation, version, segments, lastWriterGeneration, userData, lastCommittedFileName, lastCommitGeneration, null);
+    }
+
+    /**
+     * Full constructor accepting the atomically captured Lucene coordinator state bytes.
+     * Pass {@code null} for parquet-only refreshes or when reloading from disk.
+     */
+    DataformatAwareCatalogSnapshot(
+        long id,
+        long generation,
+        long version,
+        List<Segment> segments,
+        long lastWriterGeneration,
+        Map<String, String> userData,
+        String lastCommittedFileName,
+        long lastCommitGeneration,
+        byte[] luceneSegmentInfosBytes
+    ) {
         super("dataformat_aware_catalog_snapshot", generation, version);
         this.id = id;
         this.segments = Collections.unmodifiableList(new ArrayList<>(segments));
@@ -104,6 +142,7 @@ public class DataformatAwareCatalogSnapshot extends CatalogSnapshot {
         this.userData = Map.copyOf(userData);
         this.lastCommitFileName = lastCommittedFileName;
         this.lastCommitGeneration = lastCommitGeneration;
+        this.luceneSegmentInfosBytes = luceneSegmentInfosBytes;
     }
 
     /**
@@ -128,6 +167,7 @@ public class DataformatAwareCatalogSnapshot extends CatalogSnapshot {
         }
         this.segments = Collections.unmodifiableList(segmentList);
         this.numDocs = computeNumDocs(this.segments);
+        this.luceneSegmentInfosBytes = null;  // not serialized; populated only on live refresh path
     }
 
     @Override
@@ -159,6 +199,19 @@ public class DataformatAwareCatalogSnapshot extends CatalogSnapshot {
             formats.addAll(segment.dfGroupedSearchableFiles().keySet());
         }
         return formats;
+    }
+
+    /**
+     * Returns Lucene recovery-coordinator state bytes captured atomically with this snapshot's
+     * segments during refresh, or {@code null} if this snapshot was not produced by a Lucene
+     * refresh (parquet-only DFA) or was reloaded from a commit on startup.
+     *
+     * <p>Opaque to the catalog — the Lucene recovery coordinator is the only consumer. The
+     * bytes are self-contained (include their own generation prefix and footer checksum); do
+     * not re-wrap or slice them or checksum validation will fail.
+     */
+    public byte[] getLuceneSegmentInfosBytes() {
+        return luceneSegmentInfosBytes;
     }
 
     @Override
@@ -233,7 +286,8 @@ public class DataformatAwareCatalogSnapshot extends CatalogSnapshot {
             lastWriterGeneration,
             userData,
             this.getLastCommitFileName(),
-            this.lastCommitGeneration
+            this.lastCommitGeneration,
+            this.luceneSegmentInfosBytes
         );
     }
 
@@ -301,11 +355,16 @@ public class DataformatAwareCatalogSnapshot extends CatalogSnapshot {
     }
 
     /**
-     * Builds a synthetic (zero-segment) Lucene {@code SegmentInfos} whose {@code userData} carries
-     * this snapshot's userData plus the serialized catalog snapshot, then serializes it to bytes.
-     * Invoked by {@code RemoteSegmentStoreDirectory.uploadMetadata} at upload time — no engine
-     * state is touched here; the upload listener has already refreshed checkpoints on this snapshot
-     * before calling.
+     * Serializes this snapshot as a Lucene {@link SegmentInfos} envelope (zero segment entries)
+     * carrying the catalog in {@code userData}. Used for wire-format paths that expect Lucene
+     * framing — remote metadata's {@code segmentInfosBytes} (consumed by the Segment Replication
+     * replica) and local {@code segments_N.userData} persistence.
+     *
+     * <p>The upload listener has already set {@code local_checkpoint} / {@code MAX_SEQ_NO} in
+     * {@code userData} before this is invoked.
+     *
+     * <p>For the typed recovery payload carrying raw catalog bytes, see
+     * {@link #serializeCatalogBytes()}.
      */
     @Override
     public byte[] serialize() throws IOException {
@@ -313,13 +372,30 @@ public class DataformatAwareCatalogSnapshot extends CatalogSnapshot {
     }
 
     /**
-     * Serializes using {@code luceneInMemoryInfos} as the base {@link SegmentInfos} when
-     * non-null, otherwise falls back to an empty base. The catalog is layered into
-     * {@code userData} either way. Pass a non-null value when the primary engine has a
-     * Lucene {@code IndexWriter} so uploaded bytes carry real segment references.
+     * Serializes the catalog as raw bytes (no Lucene framing). These bytes travel inside
+     * {@link org.opensearch.index.store.remote.metadata.DfaRecoveryPayload#getCatalogSnapshotBytes}
+     * on the wire. Consumed via {@link #deserialize(byte[], Function)}.
      */
-    public byte[] serialize(org.apache.lucene.index.SegmentInfos luceneInMemoryInfos) throws IOException {
-        return SyntheticSegmentInfos.serialize(this, luceneInMemoryInfos);
+    public byte[] serializeCatalogBytes() throws IOException {
+        try (BytesStreamOutput out = new BytesStreamOutput()) {
+            this.writeTo(out);
+            return BytesReference.toBytes(out.bytes());
+        }
+    }
+
+    /**
+     * Reconstructs a {@link DataformatAwareCatalogSnapshot} from raw bytes produced by
+     * {@link #serializeCatalogBytes()}. {@code directoryResolver} maps a data format name to
+     * its absolute on-disk directory.
+     */
+    public static DataformatAwareCatalogSnapshot deserialize(byte[] catalogBytes, Function<String, String> directoryResolver)
+        throws IOException {
+        if (catalogBytes == null || catalogBytes.length == 0) {
+            throw new IOException("Cannot deserialize DataformatAwareCatalogSnapshot: input is null or empty");
+        }
+        try (BytesStreamInput in = new BytesStreamInput(catalogBytes)) {
+            return new DataformatAwareCatalogSnapshot(in, directoryResolver);
+        }
     }
 
     @Override

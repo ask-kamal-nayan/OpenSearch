@@ -18,30 +18,26 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Builds the Lucene {@code SegmentInfos} payload uploaded to the remote store by the DFA primary.
+ * Builds the synthetic Lucene {@code SegmentInfos} payload uploaded by the DFA primary. Zero
+ * segment entries — a transport envelope carrying the serialized {@link
+ * DataformatAwareCatalogSnapshot} in {@code userData}.
  *
- * <p>Uses the provided in-memory {@link SegmentInfos} as the base when non-null so uploaded bytes
- * carry real Lucene segment references; otherwise falls back to an empty base. In both cases the
- * snapshot userData plus the serialized DFA catalog are layered into the result's {@code userData}.
+ * <p>Real Lucene segment references travel through the format-recovery protocol in
+ * {@code RemoteSegmentMetadata.formatStates["lucene"]}, populated by
+ * {@code LuceneFormatRecoveryCoordinator}. See
+ * {@code docs/design/multi-dataformat-recovery-validation.md}.
  */
 final class SyntheticSegmentInfos {
 
     private SyntheticSegmentInfos() {}
 
-    /** Equivalent to {@code serialize(snapshot, null)}. */
-    static byte[] serialize(DataformatAwareCatalogSnapshot snapshot) throws IOException {
-        return serialize(snapshot, null);
-    }
-
     /**
-     * Serializes {@code snapshot} using {@code base} (if non-null) as the base {@link SegmentInfos}.
-     * A non-null base preserves real Lucene segment references across the remote-store round-trip.
+     * Builds envelope bytes with the catalog serialized into {@code userData} under
+     * {@link CatalogSnapshot#CATALOG_SNAPSHOT_KEY}.
      */
-    static byte[] serialize(DataformatAwareCatalogSnapshot snapshot, SegmentInfos base) throws IOException {
-        SegmentInfos segmentInfos = (base != null) ? base.clone() : new SegmentInfos(Version.LATEST.major);
-
-        Map<String, String> userData = new HashMap<>(segmentInfos.getUserData());
-        userData.putAll(snapshot.getUserData());
+    static byte[] serialize(DataformatAwareCatalogSnapshot snapshot) throws IOException {
+        SegmentInfos segmentInfos = new SegmentInfos(Version.LATEST.major);
+        Map<String, String> userData = new HashMap<>(snapshot.getUserData());
         userData.put(CatalogSnapshot.CATALOG_SNAPSHOT_KEY, snapshot.serializeToString());
         segmentInfos.setUserData(userData, false);
         segmentInfos.setNextWriteGeneration(snapshot.getLastCommitGeneration());

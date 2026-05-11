@@ -10,6 +10,7 @@ package org.opensearch.index.engine.dataformat;
 
 import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.index.IndexSettings;
+import org.opensearch.index.engine.exec.recovery.FormatRecoveryCoordinator;
 
 import java.util.Map;
 import java.util.function.Supplier;
@@ -53,5 +54,15 @@ public interface DataFormatPlugin {
         DataFormatRegistry dataFormatRegistry
     ) {
         return Map.of();
+    }
+
+    /**
+     * Optional per-format recovery coordinator. Returning a non-null coordinator opts this
+     * format into the remote-store recovery validation protocol — the coordinator is invoked
+     * at upload time to capture state and at recovery time to validate/reconstruct it.
+     * Default returns {@code null} (format does not participate).
+     */
+    default FormatRecoveryCoordinator getRecoveryCoordinator() {
+        return null;
     }
 }

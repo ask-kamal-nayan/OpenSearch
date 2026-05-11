@@ -642,6 +642,18 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         return this.store;
     }
 
+    /**
+     * Returns the per-format recovery coordinator registry for this shard. Never {@code null};
+     * returns {@link org.opensearch.index.engine.exec.recovery.FormatRecoveryRegistry#EMPTY}
+     * when DFA is disabled or no plugins register a coordinator.
+     */
+    public org.opensearch.index.engine.exec.recovery.FormatRecoveryRegistry getFormatRecoveryRegistry() {
+        if (dataFormatRegistry == null) {
+            return org.opensearch.index.engine.exec.recovery.FormatRecoveryRegistry.EMPTY;
+        }
+        return dataFormatRegistry.getFormatRecoveryRegistry();
+    }
+
     public Map<String, FormatChecksumStrategy> getChecksumStrategies() {
         return checksumStrategies;
     }
@@ -5812,22 +5824,43 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             }
 
             if (remoteSegmentMetadata != null) {
-                // Bytes are always Lucene SegmentInfos. DFA snapshots travel in userData.
-                final SegmentInfos infosSnapshot = store.buildSegmentInfos(
-                    remoteSegmentMetadata.getSegmentInfosBytes(),
-                    remoteSegmentMetadata.getGeneration()
-                );
-                long processedLocalCheckpoint = Long.parseLong(infosSnapshot.getUserData().getOrDefault(LOCAL_CHECKPOINT_KEY, "-1"));
-                // delete any other commits, we want to start the engine only from a new commit made with the downloaded infos bytes.
-                // Extra segments will be wiped on engine open.
-                for (String file : List.of(store.directory().listAll())) {
-                    if (file.startsWith(IndexFileNames.SEGMENTS)) {
-                        store.deleteQuiet(file);
+                if (remoteSegmentMetadata.getDfaPayload() != null) {
+                    // DFA v3 path — typed payload carries the catalog + per-format states directly,
+                    // no Lucene envelope, no userData tunneling. The Lucene coordinator (if any)
+                    // writes segments_N with real refs; for parquet-only DFA the fallback in
+                    // invokeRecoveryCoordinators mints a minimal segments_N with the catalog in
+                    // userData so the engine can open. Exactly one segments_N write per recovery.
+                    org.opensearch.index.store.remote.metadata.DfaRecoveryPayload payload = remoteSegmentMetadata.getDfaPayload();
+                    org.opensearch.index.engine.exec.coord.DataformatAwareCatalogSnapshot catalog =
+                        org.opensearch.index.engine.exec.coord.DataformatAwareCatalogSnapshot.deserialize(
+                            payload.getCatalogSnapshotBytes(),
+                            store.shardFormatDirectoryResolver()
+                        );
+                    long processedLocalCheckpoint = Long.parseLong(catalog.getUserData().getOrDefault(LOCAL_CHECKPOINT_KEY, "-1"));
+                    // Delete any prior segments_* so the winning writer produces a clean commit.
+                    for (String file : List.of(store.directory().listAll())) {
+                        if (file.startsWith(IndexFileNames.SEGMENTS)) {
+                            store.deleteQuiet(file);
+                        }
                     }
+                    invokeRecoveryCoordinators(catalog, payload.getFormatStates(), processedLocalCheckpoint);
+                } else {
+                    // Non-DFA / legacy (v1/v2) path — real Lucene SegmentInfos bytes travel in
+                    // segmentInfosBytes; no coordinators run.
+                    final SegmentInfos infosSnapshot = store.buildSegmentInfos(
+                        remoteSegmentMetadata.getSegmentInfosBytes(),
+                        remoteSegmentMetadata.getGeneration()
+                    );
+                    long processedLocalCheckpoint = Long.parseLong(infosSnapshot.getUserData().getOrDefault(LOCAL_CHECKPOINT_KEY, "-1"));
+                    for (String file : List.of(store.directory().listAll())) {
+                        if (file.startsWith(IndexFileNames.SEGMENTS)) {
+                            store.deleteQuiet(file);
+                        }
+                    }
+                    assert Arrays.stream(store.directory().listAll()).filter(f -> f.startsWith(IndexFileNames.SEGMENTS)).findAny().isEmpty()
+                        || indexSettings.isWarmIndex() : "There should not be any segments file in the dir";
+                    store.commitSegmentInfos(infosSnapshot, processedLocalCheckpoint, processedLocalCheckpoint);
                 }
-                assert Arrays.stream(store.directory().listAll()).filter(f -> f.startsWith(IndexFileNames.SEGMENTS)).findAny().isEmpty()
-                    || indexSettings.isWarmIndex() : "There should not be any segments file in the dir";
-                store.commitSegmentInfos(infosSnapshot, processedLocalCheckpoint, processedLocalCheckpoint);
             }
             syncSegmentSuccess = true;
         } catch (IOException e) {
@@ -5929,6 +5962,92 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                 remoteStore.decRef();
             }
         }
+    }
+
+    /**
+     * Phase 3 recovery protocol: invokes every registered {@link
+     * org.opensearch.index.engine.exec.recovery.FormatRecoveryCoordinator} whose format appears in
+     * the decoded catalog's {@code getDataFormats()} and has matching state in
+     * {@code formatStates}. Coordinators own format-specific validation and (for formats that
+     * produce Lucene-visible files) the {@code segments_N} write.
+     *
+     * <p><b>Fallback:</b> if no coordinator wrote {@code segments_N} (e.g. parquet-only DFA), a
+     * minimal synthetic {@code SegmentInfos} is minted locally with the catalog embedded in
+     * {@code userData} and committed exactly once. This is a <em>local persistence</em> concern —
+     * the wire carries the typed payload; {@code segments_N.userData} is how DFA persists the
+     * catalog on disk for re-open (Lucene's commit format has no other per-commit extension
+     * point). See {@code docs/design/multi-dataformat-recovery-validation.md} §4.6.
+     *
+     * <p>Invariant: exactly one {@code writeSegmentsN} per recovery. Disk is the source of
+     * truth — the caller deletes all {@code segments_*} before invoking coordinators and
+     * checks disk afterwards to decide whether to run the fallback. {@link
+     * org.opensearch.index.engine.exec.recovery.RecoveryOps} stays stateless.
+     */
+    private void invokeRecoveryCoordinators(
+        org.opensearch.index.engine.exec.coord.DataformatAwareCatalogSnapshot catalog,
+        java.util.Map<String, byte[]> formatStates,
+        long localCheckpoint
+    ) throws IOException {
+        org.opensearch.index.engine.exec.recovery.StoreBackedRecoveryOps ops =
+            new org.opensearch.index.engine.exec.recovery.StoreBackedRecoveryOps(store, shardPath());
+        org.opensearch.index.engine.exec.recovery.FormatRecoveryRegistry registry = getFormatRecoveryRegistry();
+
+        for (String formatName : catalog.getDataFormats()) {
+            byte[] state = formatStates.get(formatName);
+            if (state == null) {
+                continue;
+            }
+            java.util.Optional<org.opensearch.index.engine.exec.recovery.FormatRecoveryCoordinator> coordinator = registry.get(formatName);
+            if (coordinator.isEmpty()) {
+                logger.warn("format [{}] present in DFA payload but no coordinator registered; skipping", formatName);
+                continue;
+            }
+            org.opensearch.index.engine.exec.recovery.RecoveryContext ctx = new org.opensearch.index.engine.exec.recovery.RecoveryContext(
+                catalog,
+                store.directory(),
+                shardPath().getDataPath(),
+                formatName,
+                ops
+            );
+            coordinator.get().onRecovery(state, ctx);
+        }
+
+        if (segmentsNExistsOnDisk() == false) {
+            // Parquet-only DFA (or any DFA index whose coordinators don't own segments_N).
+            // Mint a minimal SegmentInfos with the catalog in userData so the engine can
+            // reconstruct the catalog on open via Store.fromSegmentInfos. Disk is the source
+            // of truth — keeps RecoveryOps stateless.
+            SegmentInfos synthetic = mintSegmentInfosForCatalog(catalog, localCheckpoint);
+            ops.writeSegmentsN(synthetic, localCheckpoint);
+        }
+    }
+
+    /** True if a {@code segments_*} file is present on disk in the shard's main directory. */
+    private boolean segmentsNExistsOnDisk() throws IOException {
+        for (String name : store.directory().listAll()) {
+            if (name.startsWith(IndexFileNames.SEGMENTS)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Builds a minimal Lucene {@link SegmentInfos} (zero segment entries) whose {@code userData}
+     * carries the serialized DFA catalog. Written to local disk ONLY via the fallback path in
+     * {@link #invokeRecoveryCoordinators} — never on the wire.
+     */
+    private static SegmentInfos mintSegmentInfosForCatalog(
+        org.opensearch.index.engine.exec.coord.DataformatAwareCatalogSnapshot catalog,
+        long localCheckpoint
+    ) throws IOException {
+        SegmentInfos infos = new SegmentInfos(org.apache.lucene.util.Version.LATEST.major);
+        java.util.Map<String, String> userData = new java.util.HashMap<>(catalog.getUserData());
+        userData.put(org.opensearch.index.engine.exec.coord.CatalogSnapshot.CATALOG_SNAPSHOT_KEY, catalog.serializeToString());
+        userData.put(LOCAL_CHECKPOINT_KEY, String.valueOf(localCheckpoint));
+        infos.setUserData(userData, false);
+        infos.setNextWriteGeneration(catalog.getLastCommitGeneration());
+        return infos;
     }
 
     private String copySegmentFiles(

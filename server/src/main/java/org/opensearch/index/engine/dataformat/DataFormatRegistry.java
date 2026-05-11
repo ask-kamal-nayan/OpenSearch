@@ -14,11 +14,14 @@ import org.opensearch.common.CheckedFunction;
 import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.exec.EngineReaderManager;
+import org.opensearch.index.engine.exec.recovery.FormatRecoveryCoordinator;
+import org.opensearch.index.engine.exec.recovery.FormatRecoveryRegistry;
 import org.opensearch.index.store.FormatChecksumStrategy;
 import org.opensearch.plugins.PluginsService;
 import org.opensearch.plugins.SearchBackEndPlugin;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -45,6 +48,9 @@ public class DataFormatRegistry {
 
     private final Map<String, DataFormat> dataFormats;
 
+    /** Per-format recovery coordinators, populated from {@link DataFormatPlugin#getRecoveryCoordinator()}. */
+    private final FormatRecoveryRegistry formatRecoveryRegistry;
+
     private static final Logger logger = LogManager.getLogger(DataFormatRegistry.class);
 
     /**
@@ -59,6 +65,7 @@ public class DataFormatRegistry {
         Map<DataFormat, DataFormatPlugin> dataFormatPlugiRegistry = new HashMap<>();
         Map<DataFormat, CheckedFunction<ReaderManagerConfig, EngineReaderManager<?>, IOException>> readerManagerBuilders = new HashMap<>();
         Map<String, DataFormat> dataFormats = new HashMap<>();
+        List<FormatRecoveryCoordinator> recoveryCoordinators = new ArrayList<>();
 
         for (DataFormatPlugin plugin : pluginsService.filterPlugins(DataFormatPlugin.class)) {
             DataFormat format = plugin.getDataFormat();
@@ -67,6 +74,10 @@ public class DataFormatRegistry {
                 throw new IllegalArgumentException("DataFormat [" + format.name() + "] is already registered by plugin [" + existing + "]");
             }
             dataFormats.put(format.name(), format);
+            FormatRecoveryCoordinator coordinator = plugin.getRecoveryCoordinator();
+            if (coordinator != null) {
+                recoveryCoordinators.add(coordinator);
+            }
         }
 
         for (SearchBackEndPlugin<?> plugin : pluginsService.filterPlugins(SearchBackEndPlugin.class)) {
@@ -81,6 +92,9 @@ public class DataFormatRegistry {
         this.dataFormatPluginRegistry = Map.copyOf(dataFormatPlugiRegistry);
         this.dataFormats = Map.copyOf(dataFormats);
         this.readerManagerBuilders = Map.copyOf(readerManagerBuilders);
+        this.formatRecoveryRegistry = recoveryCoordinators.isEmpty()
+            ? FormatRecoveryRegistry.EMPTY
+            : FormatRecoveryRegistry.of(recoveryCoordinators);
     }
 
     /**
@@ -133,6 +147,11 @@ public class DataFormatRegistry {
      */
     public Set<DataFormat> getRegisteredFormats() {
         return Set.copyOf(dataFormatPluginRegistry.keySet());
+    }
+
+    /** Returns the per-format recovery coordinator registry (non-null; may be {@link FormatRecoveryRegistry#EMPTY}). */
+    public FormatRecoveryRegistry getFormatRecoveryRegistry() {
+        return formatRecoveryRegistry;
     }
 
     /**

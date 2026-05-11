@@ -162,4 +162,96 @@ public class RemoteSegmentMetadataHandlerTests extends IndexShardTestCase {
         );
         return expectedOutput;
     }
+
+    public void testV3RoundTripNonDfa() throws IOException {
+        // Non-DFA v3: real Lucene bytes in segmentInfosBytes, no DFA payload.
+        RemoteSegmentMetadataHandler v3Handler = new RemoteSegmentMetadataHandler(RemoteSegmentMetadata.VERSION_THREE);
+
+        BytesStreamOutput output = new BytesStreamOutput();
+        OutputStreamIndexOutput indexOutput = new OutputStreamIndexOutput("dummy bytes", "dummy stream", output, 4096);
+
+        Map<String, String> expectedOutput = getDummyData();
+        ByteBuffersIndexOutput segmentInfosOutput = new ByteBuffersIndexOutput(new ByteBuffersDataOutput(), "test", "resource");
+        segmentInfos.write(segmentInfosOutput);
+        byte[] segmentInfosBytes = segmentInfosOutput.toArrayCopy();
+
+        RemoteSegmentMetadata written = new RemoteSegmentMetadata(
+            RemoteSegmentMetadata.fromMapOfStrings(expectedOutput),
+            segmentInfosBytes,
+            indexShard.getLatestReplicationCheckpoint(),
+            null
+        );
+        v3Handler.writeContent(indexOutput, written);
+        indexOutput.close();
+
+        RemoteSegmentMetadata read = v3Handler.readContent(new ByteArrayIndexInput("dummy bytes", BytesReference.toBytes(output.bytes())));
+        assertArrayEquals(segmentInfosBytes, read.getSegmentInfosBytes());
+        assertNull("Non-DFA v3 must have null dfaPayload", read.getDfaPayload());
+    }
+
+    public void testV3RoundTripWithDfaPayload() throws IOException {
+        // DFA v3: empty segmentInfosBytes, typed DfaRecoveryPayload carries catalog + formatStates.
+        RemoteSegmentMetadataHandler v3Handler = new RemoteSegmentMetadataHandler(RemoteSegmentMetadata.VERSION_THREE);
+
+        BytesStreamOutput output = new BytesStreamOutput();
+        OutputStreamIndexOutput indexOutput = new OutputStreamIndexOutput("dummy bytes", "dummy stream", output, 4096);
+
+        Map<String, String> expectedOutput = getDummyData();
+        byte[] emptySegmentInfosBytes = new byte[0];
+
+        Map<String, byte[]> formatStates = new HashMap<>();
+        formatStates.put("lucene", new byte[] { 1, 2, 3, 4 });
+        formatStates.put("parquet", new byte[] { (byte) 0xAA, (byte) 0xBB });
+
+        byte[] catalogBytes = new byte[] { 10, 20, 30, 40, 50 };
+        DfaRecoveryPayload dfaPayload = new DfaRecoveryPayload(catalogBytes, 42L, formatStates);
+
+        RemoteSegmentMetadata written = new RemoteSegmentMetadata(
+            RemoteSegmentMetadata.fromMapOfStrings(expectedOutput),
+            emptySegmentInfosBytes,
+            indexShard.getLatestReplicationCheckpoint(),
+            dfaPayload
+        );
+        v3Handler.writeContent(indexOutput, written);
+        indexOutput.close();
+
+        RemoteSegmentMetadata read = v3Handler.readContent(new ByteArrayIndexInput("dummy bytes", BytesReference.toBytes(output.bytes())));
+        assertEquals("empty segmentInfosBytes must roundtrip as empty", 0, read.getSegmentInfosBytes().length);
+        assertNotNull("DFA v3 must carry a non-null dfaPayload", read.getDfaPayload());
+        DfaRecoveryPayload readPayload = read.getDfaPayload();
+        assertArrayEquals(catalogBytes, readPayload.getCatalogSnapshotBytes());
+        assertEquals(42L, readPayload.getLastCommitGeneration());
+        assertEquals(2, readPayload.getFormatStates().size());
+        assertArrayEquals(new byte[] { 1, 2, 3, 4 }, readPayload.getFormatStates().get("lucene"));
+        assertArrayEquals(new byte[] { (byte) 0xAA, (byte) 0xBB }, readPayload.getFormatStates().get("parquet"));
+    }
+
+    public void testV3WriteV2ReadSkipsDfaPayloadForBwc() throws IOException {
+        // Writer emits v3 bytes (possibly with a DfaRecoveryPayload). Reader with v2 handler stops
+        // at the end of the legacy segmentInfosBytes section → dfaPayload == null. BWC guarantee
+        // for Lucene-only non-DFA v2 readers.
+        RemoteSegmentMetadataHandler v2Handler = new RemoteSegmentMetadataHandler(RemoteSegmentMetadata.VERSION_TWO);
+
+        BytesStreamOutput output = new BytesStreamOutput();
+        OutputStreamIndexOutput indexOutput = new OutputStreamIndexOutput("dummy bytes", "dummy stream", output, 4096);
+
+        Map<String, String> expectedOutput = getDummyData();
+        ByteBuffersIndexOutput segmentInfosOutput = new ByteBuffersIndexOutput(new ByteBuffersDataOutput(), "test", "resource");
+        segmentInfos.write(segmentInfosOutput);
+        byte[] segmentInfosBytes = segmentInfosOutput.toArrayCopy();
+
+        RemoteSegmentMetadata written = new RemoteSegmentMetadata(
+            RemoteSegmentMetadata.fromMapOfStrings(expectedOutput),
+            segmentInfosBytes,
+            indexShard.getLatestReplicationCheckpoint(),
+            null
+        );
+        // Writer always emits CURRENT_VERSION (v3) format. Reader opens it as v2.
+        written.write(indexOutput);
+        indexOutput.close();
+
+        RemoteSegmentMetadata read = v2Handler.readContent(new ByteArrayIndexInput("dummy bytes", BytesReference.toBytes(output.bytes())));
+        assertArrayEquals(segmentInfosBytes, read.getSegmentInfosBytes());
+        assertNull("v2 reader must not surface v3 dfaPayload", read.getDfaPayload());
+    }
 }
