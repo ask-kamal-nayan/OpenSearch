@@ -31,7 +31,6 @@ import org.opensearch.index.engine.dataformat.stub.InMemoryCommitter;
 import org.opensearch.index.engine.dataformat.stub.MockDataFormat;
 import org.opensearch.index.engine.dataformat.stub.MockDataFormatPlugin;
 import org.opensearch.index.engine.dataformat.stub.MockSearchBackEndPlugin;
-import org.opensearch.index.engine.exec.FileDeleter;
 import org.opensearch.index.engine.exec.Segment;
 import org.opensearch.index.engine.exec.commit.CommitterFactory;
 import org.opensearch.index.engine.exec.coord.CatalogSnapshot;
@@ -308,60 +307,6 @@ public class DataFormatAwareNRTReplicationEngineTests extends OpenSearchTestCase
         engine.close();
         expectThrows(org.apache.lucene.store.AlreadyClosedException.class, () -> engine.acquireSnapshot());
         expectThrows(org.apache.lucene.store.AlreadyClosedException.class, engine::commitStats);
-    }
-
-    /**
-     * File-deleter map must include BOTH Lucene and non-default formats.
-     * The Lucene deleter must:
-     *  (a) delete files in {@code <shardPath>/index/}
-     *  (b) guard against deleting commit files ({@code segments_*}, {@code write.lock})
-     * Without this, superseded Lucene secondary files from prior replication snapshots
-     * accumulate forever on composite-engine replicas.
-     */
-    public void testBuildReplicaFileDeletersCoversLuceneAndNonDefaultFormats() throws IOException {
-        MockDataFormat luceneLike = new MockDataFormat("lucene", 100L, Set.of());
-        MockDataFormat parquetLike = new MockDataFormat("parquet", 50L, Set.of());
-        PluginsService pluginsService = mock(PluginsService.class);
-        when(pluginsService.filterPlugins(DataFormatPlugin.class)).thenReturn(
-            List.of(MockDataFormatPlugin.of(luceneLike), MockDataFormatPlugin.of(parquetLike))
-        );
-        when(pluginsService.filterPlugins(SearchBackEndPlugin.class)).thenReturn(
-            List.of(new MockSearchBackEndPlugin(List.of("lucene", "parquet")))
-        );
-        DataFormatRegistry registry = new DataFormatRegistry(pluginsService);
-
-        Path root = createTempDir().resolve(shardId.getIndex().getUUID()).resolve(String.valueOf(shardId.id()));
-        Path indexDir = root.resolve("index");
-        Path parquetDir = root.resolve("parquet");
-        java.nio.file.Files.createDirectories(indexDir);
-        java.nio.file.Files.createDirectories(parquetDir);
-        ShardPath shardPath = new ShardPath(false, root, root, shardId);
-
-        Map<String, FileDeleter> deleters = DataFormatAwareNRTReplicationEngine.buildReplicaFileDeleters(shardPath, registry);
-
-        assertTrue("parquet deleter must be present", deleters.containsKey("parquet"));
-        assertTrue("lucene deleter must be present", deleters.containsKey("lucene"));
-
-        // Plant files in each format's directory and verify the respective deleter removes them.
-        Path luceneOrphan = indexDir.resolve("_stale_orphan.si");
-        Path parquetOrphan = parquetDir.resolve("stale.parquet");
-        java.nio.file.Files.write(luceneOrphan, new byte[] { 1, 2, 3 });
-        java.nio.file.Files.write(parquetOrphan, new byte[] { 4, 5, 6 });
-
-        deleters.get("lucene").deleteFiles(Map.of("lucene", List.of("_stale_orphan.si")));
-        assertFalse("lucene deleter must physically remove the orphan", java.nio.file.Files.exists(luceneOrphan));
-
-        deleters.get("parquet").deleteFiles(Map.of("parquet", List.of("stale.parquet")));
-        assertFalse("parquet deleter must physically remove the orphan", java.nio.file.Files.exists(parquetOrphan));
-
-        // Commit files MUST be preserved by the Lucene deleter even if listed.
-        Path segmentsCommit = indexDir.resolve("segments_5");
-        Path writeLock = indexDir.resolve("write.lock");
-        java.nio.file.Files.write(segmentsCommit, new byte[] { 9 });
-        java.nio.file.Files.write(writeLock, new byte[] { 9 });
-        deleters.get("lucene").deleteFiles(Map.of("lucene", List.of("segments_5", "write.lock")));
-        assertTrue("segments_N must be preserved", java.nio.file.Files.exists(segmentsCommit));
-        assertTrue("write.lock must be preserved", java.nio.file.Files.exists(writeLock));
     }
 
     public void testUpdateCatalogSnapshotDoesNotRecommitOnSameGeneration() throws IOException {

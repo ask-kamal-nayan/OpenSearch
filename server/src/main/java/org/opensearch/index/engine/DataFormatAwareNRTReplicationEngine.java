@@ -8,7 +8,6 @@
 
 package org.opensearch.index.engine;
 
-import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.apache.lucene.index.IndexCommit;
@@ -56,7 +55,6 @@ import org.opensearch.index.seqno.LocalCheckpointTracker;
 import org.opensearch.index.seqno.SeqNoStats;
 import org.opensearch.index.seqno.SequenceNumbers;
 import org.opensearch.index.shard.DocsStats;
-import org.opensearch.index.shard.ShardPath;
 import org.opensearch.index.store.Store;
 import org.opensearch.index.translog.Checkpoint;
 import org.opensearch.index.translog.Translog;
@@ -72,18 +70,14 @@ import org.opensearch.search.suggest.completion.CompletionStats;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.UncheckedIOException;
-import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Lock;
@@ -200,18 +194,9 @@ public class DataFormatAwareNRTReplicationEngine implements Indexer {
             } else {
                 initialCommittedSnapshots = List.of();
             }
-            // Build filesystem-level per-format deleters so IndexFileDeleter can clean up orphan
-            // files at construction time (equivalent to NRTReplicationEngine.cleanUnreferencedFiles).
-            Map<String, FileDeleter> perFormatDeleters = buildReplicaFileDeleters(store.shardPath(), engineConfig.getDataFormatRegistry());
-            // Combine per-format deleters into a single FileDeleter for CatalogSnapshotManager
-            FileDeleter compositeDeleter = filesToDelete -> {
-                Map<String, Collection<String>> allFailed = new HashMap<>();
-                for (FileDeleter deleter : perFormatDeleters.values()) {
-                    Map<String, Collection<String>> failed = deleter.deleteFiles(filesToDelete);
-                    failed.forEach((k, v) -> allFailed.computeIfAbsent(k, x -> new java.util.ArrayList<>()).addAll(v));
-                }
-                return allFailed;
-            };
+            // Catalog file deleter — DataFormatAwareStoreDirectory routes filenames to the
+            // correct per-format subdirectory based on extension; no per-format wiring needed.
+            FileDeleter compositeDeleter = buildReplicaFileDeleter();
             List<CatalogSnapshot> committed = initialCommittedSnapshots.isEmpty()
                 ? List.of(createInitialSnapshot(0L, 0L, 0L, List.of(), -1L, userData))
                 : initialCommittedSnapshots;
@@ -632,7 +617,11 @@ public class DataFormatAwareNRTReplicationEngine implements Indexer {
         if (flushFirst) {
             flush(false, true);
         }
-        return catalogSnapshotManager.acquireSnapshot();
+        final CatalogSnapshot committed;
+        synchronized (lastCommittedSnapshotMutex) {
+            committed = lastCommittedSnapshot;
+        }
+        return new GatedCloseable<>(committed, () -> {});
     }
 
     @Override
@@ -962,56 +951,33 @@ public class DataFormatAwareNRTReplicationEngine implements Indexer {
     }
 
     /**
-     * Builds filesystem-level {@link FileDeleter}s for every registered data format so that
-     * {@link org.opensearch.index.engine.exec.coord.IndexFileDeleter}'s construction-time orphan
-     * sweep can physically remove files not referenced by the restored catalog snapshot.
-     * <p>
-     * Both Lucene and non-default (pluggable) formats are wired. The replica has no
-     * {@code IndexWriter}, so Lucene-format secondary files superseded by later replication
-     * snapshots must be cleaned through this path too; without it they accumulate forever.
-     * The Lucene deleter guards against touching commit-owned files ({@code segments_N},
-     * {@code write.lock}) which are managed by {@code Store}/Lucene commit machinery rather
-     * than the catalog.
-     * <p>
-     * Each deleter is a thin wrapper over {@link Files#deleteIfExists(Path)} scoped to the
-     * format's on-disk directory — matching the path convention used by
-     * {@link org.opensearch.index.engine.exec.coord}.
+     * Catalog-tracked file deleter for the replica. Path resolution is delegated to
+     * {@link org.opensearch.index.store.DataFormatAwareStoreDirectory} via {@code store.directory()},
+     * which routes each filename to the correct per-format subdirectory based on the file's
+     * extension. Commit-managed files ({@code segments_N}, {@code write.lock}) are skipped —
+     * those are owned by Store/Lucene commit machinery, not the catalog.
      */
-    // Visible for testing.
-    static Map<String, FileDeleter> buildReplicaFileDeleters(ShardPath shardPath, DataFormatRegistry registry) {
-        Map<String, FileDeleter> deleters = new HashMap<>();
-        for (DataFormat format : registry.getRegisteredFormats()) {
-            final String formatName = format.name();
-            // Match OrphanFileScanner's path resolution: "lucene" files live directly under
-            // the shard's index/ dir; every other format has its own subdirectory.
-            final Path formatDir = "lucene".equals(formatName) ? shardPath.resolveIndex() : shardPath.getDataPath().resolve(formatName);
-            deleters.put(formatName, filesByFormat -> {
-                Collection<String> files = filesByFormat.get(formatName);
-                if (files == null || files.isEmpty()) {
-                    return Map.of();
-                }
-                Set<String> failed = new HashSet<>();
-                for (String name : files) {
-                    // Never delete Lucene commit files or write locks via the catalog cleanup
-                    // path — these are owned by Store/Lucene commit machinery, not the catalog.
-                    // Defence-in-depth against a catalog that wrongly references a commit file.
+    private FileDeleter buildReplicaFileDeleter() {
+        return filesByFormat -> {
+            Map<String, Collection<String>> failed = new HashMap<>();
+            for (Map.Entry<String, Collection<String>> entry : filesByFormat.entrySet()) {
+                final String formatName = entry.getKey();
+                for (String name : entry.getValue()) {
                     if (REPLICA_COMMIT_FILE_MANAGER.isCommitManagedFile(name)) {
                         continue;
                     }
                     try {
-                        Files.deleteIfExists(formatDir.resolve(name));
+                        store.directory().deleteFile(name);
                     } catch (NoSuchFileException ignored) {
                         // already gone — treat as success
                     } catch (IOException e) {
-                        LogManager.getLogger(DataFormatAwareNRTReplicationEngine.class)
-                            .warn("Failed to delete file [{}] in format [{}]: {}", name, formatName, e.getMessage());
-                        failed.add(name);
+                        logger.warn("Failed to delete file [{}] in format [{}]: {}", name, formatName, e.getMessage());
+                        failed.computeIfAbsent(formatName, k -> new ArrayList<>()).add(name);
                     }
                 }
-                return failed.isEmpty() ? Map.of() : Map.of(formatName, failed);
-            });
-        }
-        return deleters;
+            }
+            return failed;
+        };
     }
 
     private TranslogDeletionPolicy getTranslogDeletionPolicy() {
