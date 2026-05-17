@@ -25,6 +25,7 @@ import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.util.Version;
 import org.opensearch.cluster.metadata.CryptoMetadata;
+import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.common.CheckedFunction;
 import org.opensearch.common.Nullable;
 import org.opensearch.common.UUIDs;
@@ -1333,14 +1334,16 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
         String indexUUID,
         ShardId shardId,
         RemoteStorePathStrategy pathStrategy,
-        boolean forceClean
+        boolean forceClean,
+        IndexMetadata indexMetadata
     ) {
         try {
             RemoteSegmentStoreDirectory remoteSegmentStoreDirectory = (RemoteSegmentStoreDirectory) remoteDirectoryFactory.newDirectory(
                 remoteStoreRepoForIndex,
                 indexUUID,
                 shardId,
-                pathStrategy
+                pathStrategy,
+                indexMetadata
             );
             if (forceClean) {
                 remoteSegmentStoreDirectory.delete();

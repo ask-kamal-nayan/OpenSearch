@@ -2625,7 +2625,13 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
 
     /**
      * Returns true iff it is able to verify that remote segment store
-     * is in sync with local
+     * is in sync with local.
+     * <p>
+     * Uses {@link #getCatalogSnapshot()} (the unified API that works for both Lucene-only
+     * engines and {@link org.opensearch.index.engine.DataFormatAwareEngine}) instead of the
+     * deprecated {@link #getSegmentInfosSnapshot()} which throws for DFA engines.
+     * For Lucene-only shards the catalog snapshot wraps the SegmentInfos and {@code getFiles(true)}
+     * returns the same file collection as {@code SegmentInfos.files(true)} — behaviour preserved.
      */
     public boolean isRemoteSegmentStoreInSync() {
         assert indexSettings.isAssignedOnRemoteNode();
@@ -2633,9 +2639,9 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             RemoteSegmentStoreDirectory directory = getRemoteDirectory();
             if (directory.readLatestMetadataFile() != null) {
                 Collection<String> uploadFiles = directory.getSegmentsUploadedToRemoteStore().keySet();
-                try (GatedCloseable<SegmentInfos> segmentInfosGatedCloseable = getSegmentInfosSnapshot()) {
-                    Collection<String> localSegmentInfosFiles = segmentInfosGatedCloseable.get().files(true);
-                    Set<String> localFiles = new HashSet<>(localSegmentInfosFiles);
+                try (GatedCloseable<CatalogSnapshot> catalogRef = getCatalogSnapshot()) {
+                    Collection<String> localCatalogFiles = catalogRef.get().getFiles(true);
+                    Set<String> localFiles = new HashSet<>(localCatalogFiles);
                     // verifying that all files except EXCLUDE_FILES are uploaded to the remote
                     localFiles.removeAll(RemoteStoreRefreshListener.EXCLUDE_FILES);
                     if (uploadFiles.containsAll(localFiles)) {

@@ -418,13 +418,19 @@ final class StoreRecovery {
                     threadPool,
                     segmentsPathFixedPrefix
                 );
+                // Pass the local target's IndexSettings so the factory can choose a
+                // DataFormatAwareRemoteDirectory when the index uses a pluggable data format.
+                // For Lucene-only indices (isPluggableDataFormatEnabled() == false) the factory
+                // falls through to plain RemoteDirectory — identical behaviour to the prior 6-arg call.
                 RemoteSegmentStoreDirectory sourceRemoteDirectory = (RemoteSegmentStoreDirectory) directoryFactory.newDirectory(
                     remoteStoreRepository,
                     indexUUID,
                     shardId,
                     shallowCopyShardMetadata.getRemoteStorePathStrategy(),
                     null,
-                    RemoteStoreUtils.isServerSideEncryptionEnabledIndex(indexShard.indexSettings.getIndexMetadata())
+                    RemoteStoreUtils.isServerSideEncryptionEnabledIndex(indexShard.indexSettings.getIndexMetadata()),
+                    false,
+                    indexShard.indexSettings
                 );
                 RemoteSegmentMetadata remoteSegmentMetadata = sourceRemoteDirectory.initializeToSpecificCommit(
                     primaryTerm,
@@ -501,13 +507,19 @@ final class StoreRecovery {
                         );
                     }
                     RemoteStorePathStrategy remoteStorePathStrategy = RemoteStoreUtils.determineRemoteStorePathStrategy(prevIndexMetadata);
+                    // Pass the local target's IndexSettings so the factory can choose a
+                    // DataFormatAwareRemoteDirectory when the index uses a pluggable data format.
+                    // For Lucene-only indices the factory falls through to plain RemoteDirectory
+                    // — identical behaviour to the prior 6-arg call.
                     RemoteSegmentStoreDirectory sourceRemoteDirectory = (RemoteSegmentStoreDirectory) directoryFactory.newDirectory(
                         remoteSegmentStoreRepository,
                         prevIndexMetadata.getIndexUUID(),
                         shardId,
                         remoteStorePathStrategy,
                         null,
-                        RemoteStoreUtils.isServerSideEncryptionEnabledIndex(prevIndexMetadata)
+                        RemoteStoreUtils.isServerSideEncryptionEnabledIndex(prevIndexMetadata),
+                        false,
+                        indexShard.indexSettings
                     );
                     RemoteSegmentMetadata remoteSegmentMetadata = sourceRemoteDirectory.initializeToSpecificTimestamp(
                         recoverySource.pinnedTimestamp()

@@ -621,9 +621,10 @@ public class RemoteSegmentStoreDirectoryTests extends BaseRemoteSegmentStoreDire
             indexUUID,
             shardId,
             pathStrategy,
-            false
+            false,
+            null
         );
-        verify(remoteSegmentStoreDirectoryFactory).newDirectory(repositoryName, indexUUID, shardId, pathStrategy);
+        verify(remoteSegmentStoreDirectoryFactory).newDirectory(repositoryName, indexUUID, shardId, pathStrategy, (org.opensearch.cluster.metadata.IndexMetadata) null);
         verify(threadPool, times(0)).executor(ThreadPool.Names.REMOTE_PURGE);
         verify(remoteMetadataDirectory).delete();
         verify(remoteDataDirectory).delete();
