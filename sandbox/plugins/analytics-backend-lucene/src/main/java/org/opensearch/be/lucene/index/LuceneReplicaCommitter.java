@@ -20,7 +20,6 @@ import org.opensearch.index.engine.exec.coord.LuceneVersionConverter;
 import org.opensearch.index.store.Store;
 
 import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.io.UnsupportedEncodingException;
 import java.util.HashMap;
 import java.util.List;
@@ -104,11 +103,16 @@ public class LuceneReplicaCommitter implements Committer {
 
     @Override
     public CommitStats getCommitStats() {
-        try {
-            return new CommitStats(store.readLastCommittedSegmentsInfo());
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
-        }
+        // Use the cached SegmentInfos (maintained inside synchronized commit()) instead of
+        // reading from disk every call. Reading from disk via SegmentInfos.readCommit validates
+        // referenced segment files, which races with concurrent segment replication: in-flight
+        // file transfers or post-merge cleanup can briefly produce a state where the on-disk
+        // segments_N points at a file not yet (or no longer) on disk, surfacing as
+        // ReplicationFailedException[Store corruption] -> NoSuchFileException and forcing the
+        // replica into unnecessary peer recovery. This matches the vanilla
+        // Engine.commitStats() pattern and the existing getLastCommittedData() pattern in this
+        // class.
+        return new CommitStats(lastCommittedSegmentInfos);
     }
 
     @Override
