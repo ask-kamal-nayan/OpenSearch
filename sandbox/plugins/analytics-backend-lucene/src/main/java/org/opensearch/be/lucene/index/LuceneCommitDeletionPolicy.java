@@ -8,6 +8,8 @@
 
 package org.opensearch.be.lucene.index;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.lucene.index.IndexCommit;
 import org.apache.lucene.index.IndexDeletionPolicy;
 import org.opensearch.index.engine.exec.coord.CatalogSnapshot;
@@ -38,6 +40,8 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 class LuceneCommitDeletionPolicy extends IndexDeletionPolicy {
 
+    private static final Logger logger = LogManager.getLogger(LuceneCommitDeletionPolicy.class);
+
     private final Map<Long, IndexCommit> trackedCommits = new ConcurrentHashMap<>();
     private final Set<Long> pendingDeletes = ConcurrentHashMap.newKeySet();
     private volatile boolean hasCSCommit;
@@ -66,6 +70,14 @@ class LuceneCommitDeletionPolicy extends IndexDeletionPolicy {
                 trackedCommits.putIfAbsent(id, commit);
                 hasCSCommit = true;
                 if (pendingDeletes.remove(id)) {
+                    // [DIAG] Log every Lucene commit deletion — this is what physically removes
+                    // segments_N from disk and triggers Lucene IndexFileDeleter cleanup.
+                    logger.info(
+                        "[DIAG-luceneDel] LuceneCommitDeletionPolicy deleting commit segmentsFile={} gen={} catalogSnapshotId={}",
+                        commit.getSegmentsFileName(),
+                        commit.getGeneration(),
+                        id
+                    );
                     commit.delete();
                     trackedCommits.remove(id);
                 }
@@ -74,6 +86,11 @@ class LuceneCommitDeletionPolicy extends IndexDeletionPolicy {
         // Delete the initial non-CS commit (from store.createEmpty()) once a CS commit exists,
         // since it is no longer needed for recovery.
         if (hasCSCommit && nonCatalogSnapshotCommit != null) {
+            logger.info(
+                "[DIAG-luceneDel] deleting non-CatalogSnapshot bootstrap commit segmentsFile={} gen={}",
+                nonCatalogSnapshotCommit.getSegmentsFileName(),
+                nonCatalogSnapshotCommit.getGeneration()
+            );
             nonCatalogSnapshotCommit.delete();
             pendingDeletes.remove(0L);
             nonCatalogSnapshotCommit = null;

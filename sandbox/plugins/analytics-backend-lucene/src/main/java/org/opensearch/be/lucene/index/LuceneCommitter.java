@@ -351,6 +351,13 @@ public class LuceneCommitter extends SafeBootstrapCommitter {
         if (committed.isEmpty()) {
             throw new IllegalStateException("No Lucene commits found — index may be corrupt");
         }
+        // [DIAG] Log every commit seen on disk before trimming.
+        logger.info("[DIAG-trim] discoverAndTrimUnsafeCommits: found {} commits on disk: {}",
+            committed.size(),
+            committed.keySet().stream()
+                .map(c -> c.getSegmentsFileName() + "(gen=" + c.getGeneration() + ")")
+                .collect(Collectors.joining(", "))
+        );
         List<CatalogSnapshot> snapshots = committed.values().stream().filter(Objects::nonNull).toList();
         // No CatalogSnapshot commits found among Lucene commits — skipping safe commit trimming
         if (snapshots.isEmpty()) {
@@ -369,6 +376,13 @@ public class LuceneCommitter extends SafeBootstrapCommitter {
         if (targetCommit == null) {
             throw new IllegalStateException("Safe commit [gen=" + safeCommit.getGeneration() + "] not found among Lucene IndexCommits");
         }
+        // [DIAG] Log the chosen safe commit and which others will be discarded.
+        logger.info(
+            "[DIAG-trim] picked safeCommit gen={} file={} globalCheckpoint={}; trimming will discard all other segments_N files",
+            safeCommit.getGeneration(),
+            targetCommit.getSegmentsFileName(),
+            globalCheckpoint
+        );
         // Open a temp IndexWriter at the target commit and re-commit. The default deletion policy
         // (KeepOnlyLastCommitDeletionPolicy) discards all other segments_N files, cleaning up
         // both unsafe commits and orphan non-CatalogSnapshot commits as well, if any
@@ -379,6 +393,15 @@ public class LuceneCommitter extends SafeBootstrapCommitter {
             tempWriter.setLiveCommitData(targetCommit.getUserData().entrySet());
             tempWriter.commit();
         }
+        // [DIAG] Log resulting on-disk state after trim.
+        List<IndexCommit> remaining = DirectoryReader.listCommits(store.directory());
+        logger.info(
+            "[DIAG-trim] after trim: {} commit(s) remain on disk: {}",
+            remaining.size(),
+            remaining.stream()
+                .map(c -> c.getSegmentsFileName() + "(gen=" + c.getGeneration() + ")")
+                .collect(Collectors.joining(", "))
+        );
     }
 
     /**

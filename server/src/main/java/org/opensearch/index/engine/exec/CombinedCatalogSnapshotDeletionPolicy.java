@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.function.LongSupplier;
+import java.util.stream.Collectors;
 
 /**
  * A {@link CatalogSnapshotDeletionPolicy} that coordinates between CatalogSnapshot commits
@@ -97,6 +98,19 @@ public class CombinedCatalogSnapshotDeletionPolicy implements CatalogSnapshotDel
                 toDelete.add(commits.get(i));
             }
         }
+
+        // [DIAG] Log every onCommit decision so we can correlate with phase1 file reads.
+        logger.info(
+            "[DIAG-policy] onCommit commits.size={} keptPosition={} safeCommit.gen={} lastCommit.gen={} toDelete=[{}] heldSnapshots=[{}]",
+            commits.size(),
+            keptPosition,
+            safeCommit.getGeneration(),
+            lastCommit.getGeneration(),
+            toDelete.stream().map(c -> "gen=" + c.getGeneration()).collect(Collectors.joining(", ")),
+            snapshottedCommits.entrySet().stream()
+                .map(e -> "gen=" + e.getKey().getGeneration() + "(refs=" + e.getValue() + ")")
+                .collect(Collectors.joining(", "))
+        );
 
         updateRetentionPolicy();
 

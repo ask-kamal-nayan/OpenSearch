@@ -1378,6 +1378,36 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
             Logger logger,
             boolean ignoreSegmentsFile
         ) throws IOException {
+            try {
+                return loadMetadataInternal(catalogSnapshot, directory, logger, ignoreSegmentsFile);
+            } catch (java.nio.file.NoSuchFileException e) {
+                // [DIAG] On peer-recovery phase1 failure, log full state so we can correlate with
+                // [DIAG-acquire], [DIAG-policy], [DIAG-rmref], [DIAG-luceneDel] timestamps and
+                // identify which actor deleted the missing file.
+                String[] dirListing;
+                try {
+                    dirListing = directory.listAll();
+                } catch (IOException listEx) {
+                    dirListing = new String[] { "<listAll failed: " + listEx.getMessage() + ">" };
+                }
+                logger.error(
+                    "[DIAG-loadMeta] NoSuchFileException missingFile={} snapshot.gen={} snapshot.lastCommitFileName={} snapshot.files={} directory.listAll={}",
+                    e.getFile(),
+                    catalogSnapshot.getGeneration(),
+                    catalogSnapshot.getLastCommitFileName(),
+                    catalogSnapshot.getFiles(true),
+                    java.util.Arrays.toString(dirListing)
+                );
+                throw e;
+            }
+        }
+
+        private static LoadedMetadata loadMetadataInternal(
+            CatalogSnapshot catalogSnapshot,
+            Directory directory,
+            Logger logger,
+            boolean ignoreSegmentsFile
+        ) throws IOException {
             final long numDocs = catalogSnapshot.getNumDocs();
             final Map<String, String> commitUserDataBuilder = new HashMap<>(catalogSnapshot.getUserData());
             final Map<String, StoreFileMetadata> builder = new HashMap<>();

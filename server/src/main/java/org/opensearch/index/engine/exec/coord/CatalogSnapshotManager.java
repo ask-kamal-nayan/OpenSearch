@@ -505,12 +505,22 @@ public class CatalogSnapshotManager implements Closeable {
      */
     public GatedCloseable<CatalogSnapshot> acquireCommittedSnapshot(boolean acquiringSafe) {
         GatedCloseable<CatalogSnapshot> policyRef = deletionPolicy.acquireCommittedSnapshot(acquiringSafe);
-        return new GatedCloseable<>(policyRef.get(), () -> {
+        // [DIAG] Log every committed-snapshot acquisition so we can correlate with peer-recovery
+        // phase1 reads and any concurrent file deletion.
+        CatalogSnapshot acquired = policyRef.get();
+        logger.info(
+            "[DIAG-acquire] acquireCommittedSnapshot acquiringSafe={} returned gen={} lastCommitFileName={}",
+            acquiringSafe,
+            acquired.getGeneration(),
+            acquired.getLastCommitFileName()
+        );
+        return new GatedCloseable<>(acquired, () -> {
             try {
                 policyRef.close();
                 indexFileDeleter.revisitPolicy();
+                logger.info("[DIAG-acquire] released committed snapshot gen={}", acquired.getGeneration());
             } catch (IOException e) {
-                throw new RuntimeException("Failed to release committed snapshot [gen=" + policyRef.get().getGeneration() + "]", e);
+                throw new RuntimeException("Failed to release committed snapshot [gen=" + acquired.getGeneration() + "]", e);
             }
         });
     }

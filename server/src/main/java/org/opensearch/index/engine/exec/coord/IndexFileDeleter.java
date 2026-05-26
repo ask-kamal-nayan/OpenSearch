@@ -177,6 +177,14 @@ public class IndexFileDeleter {
         synchronized (this) {
             filesToDelete = decRefFiles(snapshot);
         }
+        // [DIAG] Log every snapshot whose files are being torn down — this is what causes
+        // segments_N to disappear; correlate with [DIAG-acquire] holds and phase1 reads.
+        logger.info(
+            "[DIAG-rmref] removeFileReferences gen={} lastCommitFileName={} filesByFormat={}",
+            snapshot.getGeneration(),
+            snapshot.getLastCommitFileName(),
+            filesToDelete
+        );
         // Delete the commit point (segments_N) BEFORE deleting data files,
         // because deleteCommit may call DirectoryReader.listCommits() which
         // needs to read segment files that are about to be deleted.
