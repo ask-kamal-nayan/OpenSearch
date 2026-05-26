@@ -98,6 +98,14 @@ public class LuceneCommitter extends SafeBootstrapCommitter {
     private final MergeIndexWriter indexWriter;
     private final LuceneCommitDeletionPolicy deletionPolicy;
     private final AtomicBoolean isClosed = new AtomicBoolean();
+
+    /**
+     * In-memory cache of the latest committed {@link SegmentInfos}. Populated in the constructor and
+     * refreshed inside the synchronized {@link #commit} method after each successful commit. Used by
+     * {@link #getCommitStats} to avoid the on-disk read race that surfaces during heavy concurrent
+     * indexing/merge activity (see {@link LuceneReplicaCommitter#getCommitStats} for the same fix).
+     */
+    private volatile SegmentInfos lastCommittedSegmentInfos;
     // Keyed by catalog snapshot generation — survives snapshot cloning at the upload boundary.
     private final Map<Long, LuceneReader> readers = new ConcurrentHashMap<>();
 
@@ -117,6 +125,9 @@ public class LuceneCommitter extends SafeBootstrapCommitter {
             this.deletionPolicy = new LuceneCommitDeletionPolicy();
             IndexWriterConfig iwc = createIndexWriterConfig(committerConfig);
             this.indexWriter = new MergeIndexWriter(store.directory(), iwc);
+            // Seed the in-memory cache with the current on-disk commit so getCommitStats()
+            // can serve from cache instead of re-reading the disk on every call.
+            this.lastCommittedSegmentInfos = SegmentInfos.readLatestCommit(indexWriter.getDirectory());
         } catch (Exception e) {
             store.decRef();
             throw e;
@@ -139,6 +150,9 @@ public class LuceneCommitter extends SafeBootstrapCommitter {
         indexWriter.setLiveCommitData(commitData.userData());
         indexWriter.commit();
         SegmentInfos committed = SegmentInfos.readLatestCommit(indexWriter.getDirectory());
+        // Refresh the cache after a successful commit so subsequent getCommitStats()
+        // calls reflect the new generation without re-reading from disk.
+        this.lastCommittedSegmentInfos = committed;
 
         // Encode writer's Lucene version as a long — keeps CatalogSnapshot Lucene-type-agnostic.
         long version = LuceneVersionConverter.encode(committed.getCommitLuceneVersion());
@@ -189,19 +203,21 @@ public class LuceneCommitter extends SafeBootstrapCommitter {
 
     /**
      * Returns commit statistics derived from the latest committed segment infos.
+     * <p>
+     * Returns the cached {@link SegmentInfos} (refreshed on each successful commit) instead of
+     * re-reading from disk. Reading from disk via {@link SegmentInfos#readLatestCommit} validates
+     * referenced segment files, which races with concurrent merges and segment file deletions —
+     * the same race that causes {@code ReplicationFailedException[Store corruption]} on replicas.
+     * Using the cache matches the vanilla {@link org.opensearch.index.engine.InternalEngine}
+     * pattern of returning a cached {@code lastCommittedSegmentInfos}.
      *
-     * @return the commit stats, or {@code null} if segment infos cannot be read
+     * @return the commit stats, or {@code null} if no commit has been observed yet
      */
     @Override
     public CommitStats getCommitStats() {
         ensureOpen();
-        try {
-            SegmentInfos segmentInfos = SegmentInfos.readLatestCommit(indexWriter.getDirectory());
-            return new CommitStats(segmentInfos);
-        } catch (IOException e) {
-            logger.warn("Failed to read segment infos for commit stats", e);
-            return null;
-        }
+        SegmentInfos cached = lastCommittedSegmentInfos;
+        return cached == null ? null : new CommitStats(cached);
     }
 
     @Override
