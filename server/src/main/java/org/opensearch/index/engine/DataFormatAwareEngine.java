@@ -207,6 +207,15 @@ public class DataFormatAwareEngine implements Indexer {
     // Refresh thread awaits this before proceeding with catalog commit.
     private volatile CountDownLatch activeFlushLatch;
 
+    // TEST-ONLY race injection. When non-null, flush() awaits {@link #flushRaceReleaseLatch}
+    // between {@code committer.commit()} and {@code updateLastCommitInfo()} after counting
+    // down {@link #flushReachedRacePointLatch}. Allows tests to deterministically reproduce
+    // the race where a concurrent refresh advances {@code latestCatalogSnapshot} between
+    // commit and update, leaving the just-committed snapshot with a stale lastCommitFileName.
+    // Production paths leave both fields null (zero-cost: two volatile reads on flush).
+    public volatile CountDownLatch flushReachedRacePointLatch;
+    public volatile CountDownLatch flushRaceReleaseLatch;
+
     /**
      * System property to enable or disable pluggable dataformat merge operations.
      * Set to "true" to enable merges (e.g., {@code -Dopensearch.pluggable.dataformat.merge.enabled=true}).
@@ -996,9 +1005,14 @@ public class DataFormatAwareEngine implements Indexer {
                 flushLock.lock();
             }
             try {
-                // Refresh first to flush buffered data to segments
-                refresh("flush");
-                translogManager.rollTranslogGeneration();
+                // Pin latestCatalogSnapshot for the whole flush so updateLastCommitInfo
+                // writes to the snapshot we just committed, not one created by a concurrent
+                // refresh. refreshLock is reentrant — inner refresh("flush") re-acquires safely.
+                refreshLock.lock();
+                try {
+                    // Refresh first to flush buffered data to segments
+                    refresh("flush");
+                    translogManager.rollTranslogGeneration();
                 // Persist the latest catalog snapshot so it survives restart
                 try (GatedConditionalCloseable<CatalogSnapshot> snapshotRef = catalogSnapshotManager.acquireSnapshotForCommit()) {
                     CatalogSnapshot snapshot = snapshotRef.get();
@@ -1059,6 +1073,9 @@ public class DataFormatAwareEngine implements Indexer {
 
                 // Notify stats cache that flush completed to refresh committed state
                 statsCache.onFlushCompleted();
+                } finally {
+                    refreshLock.unlock();
+                }
             } catch (AlreadyClosedException e) {
                 failOnTragicEvent(e);
                 throw e;
