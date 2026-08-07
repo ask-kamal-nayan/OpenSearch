@@ -1,8 +1,0 @@
-{
-  "hits": {
-    "total": 1,
-    "sources": [
-      { "name": "laptop", "brand": "brandX", "tags": ["laptop", "phone"], "price": 1200, "rating": 4.5, "stock": 10 }
-    ]
-  }
-}
