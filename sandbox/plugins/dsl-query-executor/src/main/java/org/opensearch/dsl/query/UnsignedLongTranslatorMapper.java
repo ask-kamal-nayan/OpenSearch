@@ -10,14 +10,17 @@ package org.opensearch.dsl.query;
 
 import org.apache.calcite.rel.type.RelDataTypeField;
 import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.sql.SqlOperator;
+import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.opensearch.dsl.converter.ConversionContext;
 import org.opensearch.dsl.converter.ConversionException;
 
+import java.math.BigDecimal;
 import java.util.Optional;
 
 /**
- * Translator mapper for {@code unsigned_long} fields. Delegates bound translation to
- * {@link RangeBoundMath#translateUnsignedLongBound} and term parsing to
+ * Translator mapper for {@code unsigned_long} fields. Implements bound translation logic
+ * directly (negative clamping, decimal truncation, overflow guards) and delegates term parsing to
  * {@link RangeBoundMath#parseUnsignedLongTerm}.
  *
  * <p>This mapper is a stateless singleton shared across every {@code unsigned_long} field in
@@ -32,15 +35,136 @@ final class UnsignedLongTranslatorMapper extends BaseTranslatorMapper {
     private UnsignedLongTranslatorMapper() {}
 
     /**
-     * Translates a single range bound for an unsigned_long field.
-     * Delegates to {@link RangeBoundMath#translateUnsignedLongBound} which applies legacy
+     * Translates a single range bound for an unsigned_long field applying legacy
      * {@code NumberFieldMapper.unsignedLongRangeQuery} semantics: negative clamping,
      * decimal truncation, and overflow guards.
      */
     @Override
     protected RexNode translateBound(Object value, boolean isLower, boolean inclusive, RelDataTypeField field, ConversionContext ctx)
         throws ConversionException {
-        return RangeBoundMath.translateUnsignedLongBound(value, isLower, inclusive, field, ctx);
+        if (value == null) {
+            return null;
+        }
+
+        // Parse the value to a double for sign/decimal checks.
+        double doubleValue = parseUnsignedLongBound(value, field.getName());
+
+        // Negative bounds: per NumberFieldMapper.objectToUnsignedLong(lenientBound=true),
+        // values below 0 clamp to 0 (lower) or match-none (upper).
+        if (doubleValue < 0) {
+            if (isLower) {
+                return null;
+            } else {
+                return ctx.getRexBuilder().makeLiteral(false);
+            }
+        }
+
+        // (a) Value in [0, Long.MAX_VALUE]: apply legacy decimal truncate+adjust.
+        long longValue = truncateToLong(value, doubleValue);
+        boolean hasDecimal = hasDecimalPartForUnsignedLong(value, doubleValue);
+        double sign = Math.signum(doubleValue);
+
+        // Legacy unsignedLongRangeQuery: increment/decrement for exclusive or decimal bounds.
+        if (isLower) {
+            if ((!hasDecimal && !inclusive) || (hasDecimal && sign > 0)) {
+                if (longValue == Long.MAX_VALUE) {
+                    return ctx.getRexBuilder().makeLiteral(false);
+                }
+                longValue++;
+            }
+        } else {
+            if ((!hasDecimal && !inclusive) || (hasDecimal && sign < 0)) {
+                if (longValue == 0) {
+                    return ctx.getRexBuilder().makeLiteral(false);
+                }
+                longValue--;
+            }
+        }
+
+        // Emit inclusive comparison (adjustments above made the bound inclusive).
+        RexNode literal = ctx.getRexBuilder().makeLiteral(longValue, field.getType(), true);
+        RexNode fieldRef = ctx.getRexBuilder().makeInputRef(field.getType(), field.getIndex());
+        SqlOperator op = isLower ? SqlStdOperatorTable.GREATER_THAN_OR_EQUAL : SqlStdOperatorTable.LESS_THAN_OR_EQUAL;
+        return ctx.getRexBuilder().makeCall(op, fieldRef, literal);
+    }
+
+    /**
+     * Parses an unsigned_long bound value to double for sign and magnitude checks.
+     * Mirrors {@code NumberFieldMapper.objectToDouble} pathway used by objectToUnsignedLong.
+     * For values that may be above Long.MAX_VALUE, uses BigDecimal comparison to avoid
+     * double precision loss (Long.MAX_VALUE and Long.MAX_VALUE+1 are indistinguishable as doubles).
+     *
+     * @throws ConversionException if non-numeric or above Long.MAX_VALUE
+     */
+    private static double parseUnsignedLongBound(Object value, String fieldName) throws ConversionException {
+        if (value instanceof Number num) {
+            checkAboveLongMax(num, value, fieldName);
+            return num.doubleValue();
+        }
+        // String value: parse and check via BigDecimal for precision
+        String str = value.toString();
+        try {
+            BigDecimal bd = new BigDecimal(str);
+            if (bd.compareTo(BigDecimal.valueOf(Long.MAX_VALUE)) > 0) {
+                throw new ConversionException(
+                    "Unsigned long range bound above Long.MAX_VALUE is not representable on the DSL path "
+                        + "(schema_coerce.rs UInt64→Int64 narrowing) for field '"
+                        + fieldName
+                        + "': "
+                        + value
+                );
+            }
+            return bd.doubleValue();
+        } catch (NumberFormatException e) {
+            throw new ConversionException("Non-numeric range bound for unsigned_long field '" + fieldName + "': " + value);
+        }
+    }
+
+    /** Checks if a Number value exceeds Long.MAX_VALUE using BigDecimal precision. */
+    private static void checkAboveLongMax(Number num, Object originalValue, String fieldName) throws ConversionException {
+        // For integers types already known to fit in long, skip
+        if (num instanceof Long || num instanceof Integer || num instanceof Short || num instanceof Byte) {
+            return;
+        }
+        // For Double/Float, compare against Long.MAX_VALUE with tolerance
+        BigDecimal bd = BigDecimal.valueOf(num.doubleValue());
+        if (bd.compareTo(BigDecimal.valueOf(Long.MAX_VALUE)) > 0) {
+            throw new ConversionException(
+                "Unsigned long range bound above Long.MAX_VALUE is not representable on the DSL path "
+                    + "(schema_coerce.rs UInt64→Int64 narrowing) for field '"
+                    + fieldName
+                    + "': "
+                    + originalValue
+            );
+        }
+    }
+
+    /**
+     * Truncates to long for unsigned_long bound handling. Uses BigDecimal for string values
+     * to avoid double precision loss on large longs; Number values use longValue() (floor
+     * toward zero) matching legacy BigInteger truncation.
+     */
+    private static long truncateToLong(Object value, double doubleValue) {
+        if (value instanceof Number) {
+            if (value instanceof Double || value instanceof Float) {
+                return (long) doubleValue;
+            }
+            return ((Number) value).longValue();
+        }
+        // String: use BigDecimal to preserve precision for large values
+        try {
+            return new BigDecimal(value.toString()).toBigInteger().longValue();
+        } catch (NumberFormatException e) {
+            return (long) doubleValue;
+        }
+    }
+
+    /**
+     * Checks if the value has a non-zero fractional part, for unsigned_long bound adjustment.
+     * Mirrors {@code NumberFieldMapper.hasDecimalPart}.
+     */
+    private static boolean hasDecimalPartForUnsignedLong(Object value, double doubleValue) {
+        return doubleValue % 1 != 0;
     }
 
     /**
