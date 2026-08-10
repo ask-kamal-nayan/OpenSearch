@@ -220,7 +220,7 @@ public class RangeQueryTranslator implements QueryTranslator {
      * @param fieldTypeName the SqlTypeName of the target field
      * @param fieldPrecision the precision of the field (3 for date/millis, 9 for date_nanos)
      * @return processed value as epoch milliseconds (Long) for date, epoch nanos (Long) for date_nanos,
-     *         CoercedNumber for string-to-number, or original value
+     *         Number for string-to-number coercion, or original value
      * @throws ConversionException if date parsing fails or numeric coercion fails
      */
     private Object processValue(
@@ -248,7 +248,7 @@ public class RangeQueryTranslator implements QueryTranslator {
 
         // Gate on field type
         if (RangeBoundMath.isNumericType(fieldTypeName)) {
-            return new CoercedNumber(coerceToNumber(strValue, fieldTypeName));
+            return coerceToNumber(strValue, fieldTypeName);
         } else {
             // VARCHAR/CHAR and other types: keep string as-is for lexicographic comparison
             return strValue;
@@ -258,7 +258,7 @@ public class RangeQueryTranslator implements QueryTranslator {
     /**
      * Coerces a string value to a numeric type matching the field.
      * For integer-family types, if the string contains a decimal point, it is parsed as a
-     * Double and wrapped in a CoercedNumber so the decimal-adjust logic in convert() applies.
+     * Double so the decimal-adjust logic in convert() applies.
      */
     private Number coerceToNumber(String strValue, SqlTypeName fieldTypeName) throws ConversionException {
         try {
@@ -302,16 +302,4 @@ public class RangeQueryTranslator implements QueryTranslator {
         return isNanoPrecision(precision) ? RangeDateParsing.DateResolution.NANOSECONDS : RangeDateParsing.DateResolution.MILLISECONDS;
     }
 
-    /**
-     * Wrapper to distinguish string-coerced numbers from raw numbers in createLiteral.
-     * Coerced values are built via makeLiteral with the field's type (Calcite canonically
-     * types exact-numeric literals as DECIMAL), never as TIMESTAMP.
-     */
-    static class CoercedNumber {
-        final Number value;
-
-        CoercedNumber(Number value) {
-            this.value = value;
-        }
-    }
 }

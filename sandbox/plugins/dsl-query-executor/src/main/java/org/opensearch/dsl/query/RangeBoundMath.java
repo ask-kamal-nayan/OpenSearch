@@ -40,13 +40,8 @@ final class RangeBoundMath {
     /**
      * Returns true if the numeric value has a non-zero fractional part.
      * Mirrors legacy NumberFieldMapper.hasDecimalPart.
-     * Accepts raw Number instances and CoercedNumber wrappers (from string-to-number coercion).
      */
     static boolean hasDecimalPart(Object value) {
-        if (value instanceof RangeQueryTranslator.CoercedNumber) {
-            double d = ((RangeQueryTranslator.CoercedNumber) value).value.doubleValue();
-            return d % 1 != 0;
-        }
         if (value instanceof Number) {
             double d = ((Number) value).doubleValue();
             return d % 1 != 0;
@@ -57,12 +52,8 @@ final class RangeBoundMath {
     /**
      * Returns the signum (-1, 0, or 1) of a numeric value.
      * Mirrors legacy NumberFieldMapper.signum.
-     * Accepts raw Number instances and CoercedNumber wrappers.
      */
     static double signum(Object value) {
-        if (value instanceof RangeQueryTranslator.CoercedNumber) {
-            return Math.signum(((RangeQueryTranslator.CoercedNumber) value).value.doubleValue());
-        }
         if (value instanceof Number) {
             return Math.signum(((Number) value).doubleValue());
         }
@@ -72,12 +63,8 @@ final class RangeBoundMath {
     /**
      * Truncates a numeric value to long (floor toward zero), supporting all integer family widths.
      * Used as the base truncation before narrowing to the specific integer type.
-     * Accepts raw Number instances and CoercedNumber wrappers.
      */
     static long toLongValue(Object value) {
-        if (value instanceof RangeQueryTranslator.CoercedNumber) {
-            return ((RangeQueryTranslator.CoercedNumber) value).value.longValue();
-        }
         if (value instanceof Number) {
             return ((Number) value).longValue();
         }
@@ -185,9 +172,7 @@ final class RangeBoundMath {
      */
     private static double parseFiniteDouble(Object value, String fieldName) throws ConversionException {
         double doubleValue;
-        if (value instanceof RangeQueryTranslator.CoercedNumber) {
-            doubleValue = ((RangeQueryTranslator.CoercedNumber) value).value.doubleValue();
-        } else if (value instanceof Number) {
+        if (value instanceof Number) {
             doubleValue = ((Number) value).doubleValue();
         } else {
             try {
@@ -273,11 +258,6 @@ final class RangeBoundMath {
      * @throws ConversionException if non-numeric or above Long.MAX_VALUE
      */
     static double parseUnsignedLongBound(Object value, String fieldName) throws ConversionException {
-        if (value instanceof RangeQueryTranslator.CoercedNumber cn) {
-            Number num = cn.value;
-            checkAboveLongMax(num, value, fieldName);
-            return num.doubleValue();
-        }
         if (value instanceof Number num) {
             checkAboveLongMax(num, value, fieldName);
             return num.doubleValue();
@@ -326,12 +306,6 @@ final class RangeBoundMath {
      * toward zero) matching legacy BigInteger truncation.
      */
     private static long truncateToLong(Object value, double doubleValue) {
-        if (value instanceof RangeQueryTranslator.CoercedNumber cn) {
-            if (cn.value instanceof Double || cn.value instanceof Float) {
-                return (long) cn.value.doubleValue();
-            }
-            return cn.value.longValue();
-        }
         if (value instanceof Number) {
             if (value instanceof Double || value instanceof Float) {
                 return (long) doubleValue;

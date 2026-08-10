@@ -108,11 +108,6 @@ final class DefaultTranslatorMapper extends BaseTranslatorMapper {
 
     /**
      * Creates a literal RexNode with appropriate type based on the field type and value.
-     * <p>
-     * For CoercedNumber values (from string-to-number coercion), uses makeLiteral with the
-     * field's type; Calcite canonically types exact-numeric literals as DECIMAL which is
-     * semantically equivalent for comparisons.
-     * For other types, uses the field's original type.
      *
      * @param value the value to create a literal for
      * @param field the field definition from the schema
@@ -121,12 +116,6 @@ final class DefaultTranslatorMapper extends BaseTranslatorMapper {
      * @return RexNode literal with appropriate type and precision
      */
     private RexNode createLiteral(Object value, RelDataTypeField field, ConversionContext ctx, SqlTypeName fieldTypeName) {
-        if (value instanceof RangeQueryTranslator.CoercedNumber) {
-            // For string-coerced numbers, use Calcite's standard makeLiteral.
-            // Calcite canonically types exact-numeric literals as DECIMAL which is correct.
-            Number num = ((RangeQueryTranslator.CoercedNumber) value).value;
-            return ctx.getRexBuilder().makeLiteral(num, field.getType(), true);
-        }
         return ctx.getRexBuilder().makeLiteral(value, field.getType(), true);
     }
 }

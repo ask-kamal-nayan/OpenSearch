@@ -1346,6 +1346,24 @@ public class RangeQueryTranslatorTests extends OpenSearchTestCase {
         assertEquals(SqlKind.IS_NOT_NULL, call.getKind());
     }
 
+    // ========== STRING-COERCED NUMERIC BOUND TESTS ==========
+
+    public void testGteStringDecimalOnScaledFloat() throws ConversionException {
+        // gte "1.5" (string) with factor 10 -> Math.round(1.5 * 10) = 15, inclusive, GTE
+        RexNode result = translator.convert(QueryBuilders.rangeQuery("scaled_price").gte("1.5"), ctx);
+        RexCall call = (RexCall) result;
+        assertEquals(SqlKind.GREATER_THAN_OR_EQUAL, call.getKind());
+        assertEquals(Long.valueOf(15L), extractLiteralLong(call.getOperands().get(1)));
+    }
+
+    public void testGteStringWholeNumberOnUnsignedLong() throws ConversionException {
+        // gte "100" (string) on unsigned_long: whole number within Long range -> GTE 100
+        RexNode result = translator.convert(QueryBuilders.rangeQuery("unsigned_counter").gte("100"), ctx);
+        RexCall call = (RexCall) result;
+        assertEquals(SqlKind.GREATER_THAN_OR_EQUAL, call.getKind());
+        assertEquals(Long.valueOf(100L), extractLiteralLong(call.getOperands().get(1)));
+    }
+
     // ========== FIX 1: NaN/Infinity rejection on scaled_float range ==========
 
     /** NaN string bound on scaled_float must throw ConversionException, not silently produce 0. */
