@@ -30,6 +30,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Segment-global ordinals for a high-cardinality keyword field, uninverted once from the Lucene
@@ -52,21 +53,48 @@ import java.util.List;
  */
 public final class UninvertedOrdinals implements Closeable {
 
-    static final int CHECKPOINT_INTERVAL = 1024;
+    static final int CHECKPOINT_INTERVAL = 256;
     private static final String CODEC_PREFIX = "parquet-ords";
+    // PORD = parquet ord file header magic.
+    private static final int ORD_FILE_MAGIC = 0x504F5244; // "PORD"
+    private static final int ORD_FILE_VERSION = 1;
+    // PORF = parquet ord file footer magic.
+    private static final int ORD_FILE_FOOTER_MAGIC = 0x504F5246; // "PORF"
+
+    private record OrdFileMetadata(
+        int maxDoc, // Number of document slots encoded in the payload.
+        long termCount, // Distinct term count for this segment field.
+        long assignedDocs, // Number of docs that actually received a non-missing ord during build.
+        int checkpointInterval // Checkpoint spacing persisted with the file for layout validation.
+    ) {}
+
+    private record LoadedOrdFile(IndexInput input, IndexInput payloadInput, LongValues ords, BytesRef[] checkpoints, long sizeInBytes) {}
+
+    private static final class InvalidOrdFileException extends IOException {
+        private InvalidOrdFileException(String message) {
+            super(message);
+        }
+
+        private InvalidOrdFileException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
 
     private final Directory directory;
     private final IndexInput input;
+    private final IndexInput payloadInput;
     private final LongValues ords;
     private final BytesRef[] checkpoints;
     private final Terms terms;
     private final int valueCount;
     private final long sizeInBytes;
     private final String fileName;
+    private final AtomicBoolean closed = new AtomicBoolean();
 
     private UninvertedOrdinals(
         Directory directory,
         IndexInput input,
+        IndexInput payloadInput,
         LongValues ords,
         BytesRef[] checkpoints,
         Terms terms,
@@ -76,6 +104,7 @@ public final class UninvertedOrdinals implements Closeable {
     ) {
         this.directory = directory;
         this.input = input;
+        this.payloadInput = payloadInput;
         this.ords = ords;
         this.checkpoints = checkpoints;
         this.terms = terms;
@@ -106,93 +135,272 @@ public final class UninvertedOrdinals implements Closeable {
         if (termCount < 0) {
             throw new IllegalStateException("terms index reports unknown size; cannot uninvert");
         }
+
         Files.createDirectories(ordsDir);
         Directory directory = new MMapDirectory(ordsDir);
         String fileName = CODEC_PREFIX + "-" + fileKey + ".ord";
-        // +1 shifted encoding (0 = missing). DirectWriter supports only specific widths;
-        // its bitsRequired rounds up to the nearest supported one.
-        int bits = DirectWriter.bitsRequired(termCount + 1);
-        List<BytesRef> checkpoints = new ArrayList<>((int) (termCount / CHECKPOINT_INTERVAL) + 1);
-
-        boolean exists;
         try {
-            directory.fileLength(fileName);
-            exists = true;
-        } catch (java.io.FileNotFoundException | java.nio.file.NoSuchFileException e) {
-            exists = false;
-        }
+            int bits = DirectWriter.bitsRequired(termCount + 1);
+            LoadedOrdFile loaded = null;
+            boolean exists;
+            try {
+                directory.fileLength(fileName);
+                exists = true;
+            } catch (java.io.FileNotFoundException | java.nio.file.NoSuchFileException e) {
+                exists = false;
+            }
+            if (exists) {
+                try {
+                    loaded = loadOrdFile(directory, fileName, termCount, maxDoc, expectedNonNullDocs);
+                } catch (InvalidOrdFileException e) {
+                    deleteInvalidOrdFileIfPresent(directory, fileName);
+                    exists = false;
+                } catch (java.io.FileNotFoundException | java.nio.file.NoSuchFileException e) {
+                    exists = false;
+                }
+            }
 
-        if (exists == false) {
-            // Sweep: heap-transient packed buffer (released after spill), then one sequential write.
-            PackedInts.Mutable building = PackedInts.getMutable(maxDoc, bits, PackedInts.COMPACT);
-            TermsEnum termsEnum = terms.iterator();
-            PostingsEnum postings = null;
-            long ord = 0;
-            for (BytesRef term = termsEnum.next(); term != null; term = termsEnum.next(), ord++) {
-                if ((ord & (CHECKPOINT_INTERVAL - 1)) == 0) {
-                    if (cancelled.getAsBoolean()) {
+            if (exists == false) {
+                PackedInts.Mutable building = PackedInts.getMutable(maxDoc, bits, PackedInts.COMPACT);
+                List<BytesRef> checkpoints = new ArrayList<>((int) (termCount / CHECKPOINT_INTERVAL) + 1);
+                TermsEnum termsEnum = terms.iterator();
+                PostingsEnum postings = null;
+                long ord = 0;
+                long assignedDocs = 0;
+                for (BytesRef term = termsEnum.next(); term != null; term = termsEnum.next(), ord++) {
+                    if ((ord & (CHECKPOINT_INTERVAL - 1)) == 0 && cancelled.getAsBoolean()) {
                         throw new IOException("ordinal build cancelled for " + fileKey);
                     }
+                    if ((ord % CHECKPOINT_INTERVAL) == 0) {
+                        checkpoints.add(BytesRef.deepCopyOf(term));
+                    }
+                    assignedDocs += termsEnum.docFreq();
+                    postings = termsEnum.postings(postings, PostingsEnum.NONE);
+                    for (int doc = postings.nextDoc(); doc != DocIdSetIterator.NO_MORE_DOCS; doc = postings.nextDoc()) {
+                        building.set(doc, ord + 1);
+                    }
                 }
-                postings = termsEnum.postings(postings, PostingsEnum.NONE);
-                for (int doc = postings.nextDoc(); doc != DocIdSetIterator.NO_MORE_DOCS; doc = postings.nextDoc()) {
-                    building.set(doc, ord + 1);
+                if (assignedDocs != expectedNonNullDocs) {
+                    throw new IllegalStateException(coverageMismatchMessage(fileKey, assignedDocs, expectedNonNullDocs));
                 }
-            }
-            String tempName = fileName + ".tmp";
-            try {
-                directory.deleteFile(tempName); // stale leftover from an interrupted build
-            } catch (java.io.FileNotFoundException | java.nio.file.NoSuchFileException e) {
-                // normal case
-            }
-            try (IndexOutput out = directory.createOutput(tempName, IOContext.DEFAULT)) {
-                DirectWriter writer = DirectWriter.getInstance(out, maxDoc, bits);
-                for (int doc = 0; doc < maxDoc; doc++) {
-                    writer.add(building.get(doc));
-                }
-                writer.finish();
-            }
-            directory.rename(tempName, fileName);
-        }
 
-        // Checkpoints are cheap relative to the sweep; collect them on every load.
-        TermsEnum termsEnum = terms.iterator();
-        long ord = 0;
-        for (BytesRef term = termsEnum.next(); term != null; term = termsEnum.next(), ord++) {
-            if ((ord % CHECKPOINT_INTERVAL) == 0) {
-                checkpoints.add(BytesRef.deepCopyOf(term));
-            }
-        }
+                String tempName = fileName + ".tmp";
+                deleteFileIfPresent(directory, tempName);
+                try (IndexOutput out = directory.createOutput(tempName, IOContext.DEFAULT)) {
+                    writeOrdFileHeader(out, maxDoc, termCount, assignedDocs);
+                    DirectWriter writer = DirectWriter.getInstance(out, maxDoc, bits);
+                    for (int doc = 0; doc < maxDoc; doc++) {
+                        writer.add(building.get(doc));
+                    }
+                    writer.finish();
+                    writeOrdFileCheckpoints(out, checkpoints);
+                    out.writeInt(ORD_FILE_FOOTER_MAGIC);
+                }
 
-        IndexInput input = directory.openInput(fileName, IOContext.DEFAULT);
-        LongValues ords = DirectReader.getInstance(input.randomAccessSlice(0, input.length()), bits);
-        long size = directory.fileLength(fileName);
-        // Coverage verification: postings only contain INDEXED values. A stored value that was
-        // never indexed (ignore_above truncation, analyzer drops) would silently become
-        // "missing" and undercount every aggregation on this field. Count assigned ordinals and
-        // require exact agreement with the Parquet column's non-null row count; refuse loudly
-        // otherwise. One sequential mapped read per segment load (~100ms per 100M rows).
-        long assigned = 0;
-        for (int doc = 0; doc < maxDoc; doc++) {
-            if (ords.get(doc) != 0) {
-                assigned++;
+                directory.rename(tempName, fileName);
+                loaded = loadOrdFile(directory, fileName, termCount, maxDoc, expectedNonNullDocs);
             }
-        }
-        if (assigned != expectedNonNullDocs) {
-            input.close();
-            directory.close();
-            throw new IllegalStateException(
-                "ordinal coverage mismatch for "
-                    + fileKey
-                    + ": postings assign "
-                    + assigned
-                    + " documents but the column stores "
-                    + expectedNonNullDocs
-                    + " non-null values — some stored values are not indexed (ignore_above?); "
-                    + "refusing uninverted ordinals to avoid silent undercounts"
+
+            return new UninvertedOrdinals(
+                directory,
+                loaded.input(),
+                loaded.payloadInput(),
+                loaded.ords(),
+                loaded.checkpoints(),
+                terms,
+                (int) termCount,
+                loaded.sizeInBytes(),
+                fileName
             );
+        } catch (IOException | RuntimeException e) {
+            directory.close();
+            throw e;
         }
-        return new UninvertedOrdinals(directory, input, ords, checkpoints.toArray(new BytesRef[0]), terms, (int) termCount, size, fileName);
+    }
+
+    static long estimatedDiskBytes(long termCount, int maxDoc) {
+        long bits = DirectWriter.bitsRequired(termCount + 1);
+        long checkpointCount = termCount == 0 ? 0 : (termCount + CHECKPOINT_INTERVAL - 1) / CHECKPOINT_INTERVAL;
+        long checkpointEstimate = checkpointCount * 64L;
+        return DirectWriter.bytesRequired(maxDoc, (int) bits) + 1024L + checkpointEstimate;
+    }
+
+
+    private static String coverageMismatchMessage(String fileKey, long assignedDocs, long expectedNonNullDocs) {
+        return "ordinal coverage mismatch for "
+            + fileKey
+            + ": postings assign "
+            + assignedDocs
+            + " documents but the column stores "
+            + expectedNonNullDocs
+            + " non-null values — some stored values are not indexed (ignore_above?); "
+            + "refusing uninverted ordinals to avoid silent undercounts";
+    }
+
+    private static long packedPayloadLength(int maxDoc, int bits) {
+        return DirectWriter.bytesRequired(maxDoc, bits);
+    }
+
+
+    private static void writeOrdFileHeader(IndexOutput out, int maxDoc, long termCount, long assignedDocs)
+        throws IOException {
+        out.writeInt(ORD_FILE_MAGIC);
+        out.writeInt(ORD_FILE_VERSION);
+        out.writeInt(maxDoc);
+        out.writeLong(termCount);
+        out.writeLong(assignedDocs);
+        out.writeInt(CHECKPOINT_INTERVAL);
+    }
+
+    private static void writeOrdFileCheckpoints(IndexOutput out, List<BytesRef> checkpoints) throws IOException {
+        for (BytesRef checkpoint : checkpoints) {
+            out.writeInt(checkpoint.length);
+            out.writeBytes(checkpoint.bytes, checkpoint.offset, checkpoint.length);
+        }
+    }
+
+    private static OrdFileMetadata readOrdFileMetadata(IndexInput input) throws IOException {
+        final int magic;
+        final int version;
+        final int maxDoc;
+        final long termCount;
+        final long assignedDocs;
+        final int checkpointInterval;
+        try {
+            magic = input.readInt();
+            version = input.readInt();
+            maxDoc = input.readInt();
+            termCount = input.readLong();
+            assignedDocs = input.readLong();
+            checkpointInterval = input.readInt();
+        } catch (IOException e) {
+            throw new InvalidOrdFileException("ord file header is truncated", e);
+        }
+        if (magic != ORD_FILE_MAGIC) {
+            throw new InvalidOrdFileException("legacy or invalid ord file magic: " + Integer.toHexString(magic));
+        }
+        if (version != ORD_FILE_VERSION) {
+            throw new InvalidOrdFileException("unsupported ord file version: " + version);
+        }
+        return new OrdFileMetadata(maxDoc, termCount, assignedDocs, checkpointInterval);
+    }
+
+    private static LoadedOrdFile loadOrdFile(
+        Directory directory,
+        String fileName,
+        long expectedTermCount,
+        int expectedMaxDoc,
+        long expectedNonNullDocs
+    ) throws IOException {
+        IndexInput input = directory.openInput(fileName, IOContext.DEFAULT);
+        IndexInput payloadInput = null;
+        try {
+            OrdFileMetadata metadata = readOrdFileMetadata(input);
+            if (metadata.maxDoc() != expectedMaxDoc) {
+                throw new InvalidOrdFileException("ord file maxDoc mismatch");
+            }
+            if (metadata.termCount() != expectedTermCount) {
+                throw new InvalidOrdFileException("ord file termCount mismatch");
+            }
+            if (metadata.assignedDocs() != expectedNonNullDocs) {
+                throw new InvalidOrdFileException(coverageMismatchMessage(fileName, metadata.assignedDocs(), expectedNonNullDocs));
+            }
+            if (metadata.checkpointInterval() != CHECKPOINT_INTERVAL) {
+                throw new InvalidOrdFileException("ord file checkpoint interval mismatch");
+            }
+            int expectedCheckpointCount = expectedTermCount == 0 ? 0 : (int) ((expectedTermCount + CHECKPOINT_INTERVAL - 1) / CHECKPOINT_INTERVAL);
+
+            int bits = DirectWriter.bitsRequired(metadata.termCount() + 1);
+            long payloadOffset = input.getFilePointer();
+            long payloadLength = packedPayloadLength(expectedMaxDoc, bits);
+            long checkpointStart = payloadOffset + payloadLength;
+            if (checkpointStart > input.length()) {
+                throw new InvalidOrdFileException("ord file payload length mismatch");
+            }
+
+            BytesRef[] checkpoints = readOrdFileCheckpoints(input, checkpointStart, expectedCheckpointCount);
+            verifyOrdFileFooter(input);
+            verifyOrdFileEnd(input);
+            payloadInput = input.slice("ord-payload", payloadOffset, payloadLength);
+            LongValues ords = DirectReader.getInstance(payloadInput.randomAccessSlice(0, payloadLength), bits);
+            return new LoadedOrdFile(input, payloadInput, ords, checkpoints, directory.fileLength(fileName));
+        } catch (IOException | RuntimeException e) {
+            if (payloadInput != null) {
+                payloadInput.close();
+            }
+            input.close();
+            throw e;
+        }
+    }
+
+    private static BytesRef[] readOrdFileCheckpoints(IndexInput input, long checkpointStart, int checkpointCount) throws IOException {
+        input.seek(checkpointStart);
+        BytesRef[] checkpoints = new BytesRef[checkpointCount];
+        for (int i = 0; i < checkpointCount; i++) {
+            final int length;
+            try {
+                length = input.readInt();
+            } catch (IOException e) {
+                throw new InvalidOrdFileException("ord file checkpoint section truncated", e);
+            }
+            if (length < 0) {
+                throw new InvalidOrdFileException("ord file checkpoint length is invalid");
+            }
+            byte[] bytes = new byte[length];
+            try {
+                input.readBytes(bytes, 0, length);
+            } catch (IOException e) {
+                throw new InvalidOrdFileException("ord file checkpoint section truncated", e);
+            }
+            checkpoints[i] = new BytesRef(bytes);
+        }
+        return checkpoints;
+    }
+
+    private static void verifyOrdFileFooter(IndexInput input) throws IOException {
+        final int footerMagic;
+        try {
+            footerMagic = input.readInt();
+        } catch (IOException e) {
+            throw new InvalidOrdFileException("ord file footer is truncated", e);
+        }
+        if (footerMagic != ORD_FILE_FOOTER_MAGIC) {
+            throw new InvalidOrdFileException("ord file footer mismatch");
+        }
+    }
+
+    private static void verifyOrdFileEnd(IndexInput input) throws IOException {
+        if (input.getFilePointer() != input.length()) {
+            throw new InvalidOrdFileException("ord file has trailing bytes");
+        }
+    }
+
+    private static void deleteFileIfPresent(Directory directory, String fileName) {
+        try {
+            directory.deleteFile(fileName);
+        } catch (IOException e) {
+            // ignore stale/missing artifacts
+        }
+    }
+
+    private static void deleteInvalidOrdFileIfPresent(Directory directory, String fileName) {
+        deleteFileIfPresent(directory, fileName);
+    }
+
+    private static void closeLoadedOrdFile(LoadedOrdFile loaded) {
+        if (loaded == null) {
+            return;
+        }
+        try {
+            loaded.payloadInput().close();
+        } catch (IOException e) {
+            // ignore
+        }
+        try {
+            loaded.input().close();
+        } catch (IOException e) {
+            // ignore
+        }
     }
 
     /** The segment ordinal for {@code doc}, or -1 when the document has no value. */
@@ -302,10 +510,9 @@ public final class UninvertedOrdinals implements Closeable {
     /**
      * Stateful ord→term resolution for one consumer (not thread-safe, like doc-values
      * iterators). A stateless resolver pays a checkpoint seek plus up to
-     * {@value #CHECKPOINT_INTERVAL} enum steps on EVERY call, which turns full-column walks
-     * quadratic; this cursor advances forward from its last position when the requested
-     * ordinal is ahead, so monotonic access — bucket resolution, ordinal-map style walks —
-     * amortizes to a single sequential pass over the terms file.
+     * {@value #CHECKPOINT_INTERVAL} enum steps on every call; this cursor advances forward from
+     * its last position when the requested ordinal is ahead, so monotonic access amortizes to a
+     * single sequential pass over the terms file.
      */
     public final class TermCursor {
         private TermsEnum cursorEnum;
@@ -313,9 +520,8 @@ public final class UninvertedOrdinals implements Closeable {
 
         public BytesRef term(int ord) {
             try {
-                long behind = cursorEnum == null ? Long.MAX_VALUE : ord - cursorOrd;
-                if (behind < 0 || behind > CHECKPOINT_INTERVAL) {
-                    // Behind us, or far ahead: re-seek to the nearest checkpoint.
+                long delta = cursorEnum == null ? Long.MAX_VALUE : ord - cursorOrd;
+                if (delta < 0 || delta > CHECKPOINT_INTERVAL) {
                     cursorEnum = terms.iterator();
                     int checkpoint = ord / CHECKPOINT_INTERVAL;
                     cursorEnum.seekCeil(checkpoints[checkpoint]);
@@ -335,7 +541,9 @@ public final class UninvertedOrdinals implements Closeable {
     /** The ordinal of {@code key}, or {@code -insertionPoint - 1} (the lookupTerm contract). */
     public int rank(BytesRef key) {
         try {
-            // Binary search over checkpoints, then a bounded linear scan with the enum.
+            if (checkpoints.length == 0) {
+                return -1;
+            }
             int low = 0;
             int high = checkpoints.length - 1;
             while (low <= high) {
@@ -373,7 +581,32 @@ public final class UninvertedOrdinals implements Closeable {
 
     @Override
     public void close() throws IOException {
-        input.close();
-        directory.close();
+        // Idempotent so eviction and later segment cleanup can safely race on the same entry.
+        if (closed.compareAndSet(false, true) == false) {
+            return;
+        }
+        IOException first = null;
+        try {
+            payloadInput.close();
+        } catch (IOException e) {
+            first = e;
+        }
+        try {
+            input.close();
+        } catch (IOException e) {
+            if (first == null) {
+                first = e;
+            }
+        }
+        try {
+            directory.close();
+        } catch (IOException e) {
+            if (first == null) {
+                first = e;
+            }
+        }
+        if (first != null) {
+            throw first;
+        }
     }
 }

@@ -96,6 +96,9 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
     /** Field name -> synthetic FieldInfo for Parquet-resident DV fields served by this reader. */
     private final Map<String, FieldInfo> parquetFields;
 
+    /** Request-scoped uninverted-ordinal leases keyed by field, released when this reader closes. */
+    private final Map<String, UninvertedOrdinalsCache.Lease> uninvertedOrdinalsLeases = new HashMap<>();
+
     /** The segment read state used to build the producer (captured at construction). */
     private final SegmentReadState segmentReadState;
 
@@ -366,6 +369,19 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
      * scan. Above-budget fields keep the streaming iterator, whose global-ordinal operations
      * fail fast rather than materialize.
      */
+    private synchronized UninvertedOrdinalsCache.Lease acquireUninvertedOrdinalsLease(String field, long expectedNonNullDocs)
+        throws IOException {
+        UninvertedOrdinalsCache.Lease lease = uninvertedOrdinalsLeases.get(field);
+        if (lease != null) {
+            return lease;
+        }
+        lease = UninvertedOrdinalsCache.acquire(in, segmentReadState.segmentInfo, field, expectedNonNullDocs);
+        if (lease != null) {
+            uninvertedOrdinalsLeases.put(field, lease);
+        }
+        return lease;
+    }
+
     private SortedDocValues withDictionaryOrdinals(String field, SortedDocValues sorted) throws IOException {
         // Ordinal tiers rank Parquet VALUES against the Lucene sidecar's TERMS, which only
         // coincide for untokenized (keyword) fields. A text field's terms are analyzer tokens:
@@ -387,9 +403,9 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
             // Above the dictionary budget: disk-backed uninverted ordinals (built once per
             // segment from the sidecar's postings, memory-mapped, working-set resident).
             long expectedNonNull = producer().nonNullRowCount(parquetFieldInfo(field));
-            UninvertedOrdinals uninverted = UninvertedOrdinalsCache.get(in, segmentReadState.segmentInfo, field, expectedNonNull);
-            if (uninverted != null) {
-                return new ParquetUninvertedSortedDocValues(uninverted, streaming, maxDoc());
+            UninvertedOrdinalsCache.Lease lease = acquireUninvertedOrdinalsLease(field, expectedNonNull);
+            if (lease != null) {
+                return new ParquetUninvertedSortedDocValues(lease.ordinals(), streaming, maxDoc());
             }
         }
         return sorted;
@@ -449,7 +465,12 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
      * wrappers returned by its {@code SubReaderWrapper}. The request-scoped directory reader
      * therefore calls this method explicitly before closing its non-closing delegate.
      */
-    void closeParquetResources() throws IOException {
+    synchronized void closeParquetResources() throws IOException {
+        for (UninvertedOrdinalsCache.Lease lease : uninvertedOrdinalsLeases.values()) {
+            lease.close();
+        }
+        uninvertedOrdinalsLeases.clear();
+
         IOException first = null;
         try {
             if (producer != null) {
