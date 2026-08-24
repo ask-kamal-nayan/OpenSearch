@@ -29,6 +29,7 @@ public class QueryRegistryFactory {
         registry.register(new WildcardQueryTranslator());
         registry.register(new FuzzyQueryTranslator());
         registry.register(new IdsQueryTranslator());
+        registry.register(new RegexpQueryTranslator());
         // TODO: add other query translators
         return registry;
     }

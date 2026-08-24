@@ -96,6 +96,7 @@ public class LuceneAnalyticsBackendPlugin implements AnalyticsSearchBackendPlugi
         ScalarFunction.WILDCARD_QUERY,
         ScalarFunction.PREFIX_QUERY,
         ScalarFunction.WILDCARD_QUERY_DSL,
+        ScalarFunction.REGEXP_QUERY,
         ScalarFunction.QUERY,
         ScalarFunction.MATCHALL,
         ScalarFunction.IDS
