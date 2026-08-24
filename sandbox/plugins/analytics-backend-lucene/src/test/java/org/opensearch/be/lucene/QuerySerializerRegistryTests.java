@@ -296,7 +296,10 @@ public class QuerySerializerRegistryTests extends OpenSearchTestCase {
             ScalarFunction.LESS_THAN,
             ScalarFunction.LESS_THAN_OR_EQUAL,
             ScalarFunction.REGEXP,
-            ScalarFunction.SARG_PREDICATE
+            ScalarFunction.REGEXP_QUERY,
+            ScalarFunction.SARG_PREDICATE,
+            ScalarFunction.FUZZY,
+            ScalarFunction.IDS
         );
         assertEquals("Registry key set must match expected ScalarFunction set", expected, serializers.keySet());
     }
@@ -1284,43 +1287,6 @@ public class QuerySerializerRegistryTests extends OpenSearchTestCase {
         assertTrue(
             "Exception message must name the offending parameter, got: " + exception.getMessage(),
             exception.getMessage().contains("transpositions")
-        );
-    }
-
-    // --- Registry key-set assertion test ---
-
-    /**
-     * Asserts the registry's key set matches the expected set of ScalarFunctions.
-     * Ensures new serializer registrations are deliberate and accounted for.
-     * Mirrors the registry key-set assertion pattern used by sibling test classes.
-     */
-    public void testRegistryKeySetMatchesExpectedFunctions() {
-        assertEquals(
-            Set.of(
-                ScalarFunction.MATCH,
-                ScalarFunction.MATCH_PHRASE,
-                ScalarFunction.MATCH_BOOL_PREFIX,
-                ScalarFunction.MATCH_PHRASE_PREFIX,
-                ScalarFunction.MULTI_MATCH,
-                ScalarFunction.QUERY_STRING,
-                ScalarFunction.SIMPLE_QUERY_STRING,
-                ScalarFunction.WILDCARD_QUERY,
-                ScalarFunction.QUERY,
-                ScalarFunction.MATCHALL,
-                ScalarFunction.EQUALS,
-                ScalarFunction.NOT_EQUALS,
-                ScalarFunction.IS_NULL,
-                ScalarFunction.IS_NOT_NULL,
-                ScalarFunction.LIKE,
-                ScalarFunction.GREATER_THAN,
-                ScalarFunction.GREATER_THAN_OR_EQUAL,
-                ScalarFunction.LESS_THAN,
-                ScalarFunction.LESS_THAN_OR_EQUAL,
-                ScalarFunction.REGEXP,
-                ScalarFunction.SARG_PREDICATE,
-                ScalarFunction.FUZZY
-            ),
-            serializers.keySet()
         );
     }
 

@@ -40,11 +40,12 @@ public class QueryRegistryTests extends OpenSearchTestCase {
     }
 
     public void testUnknownQueryTypeReturnsUnresolved() throws ConversionException {
-        RexNode result = registry.convert(QueryBuilders.regexpQuery("name", "lap.*"), ctx);
+        // match query has no translator registered (regexp/prefix/wildcard/fuzzy/ids are now supported)
+        RexNode result = registry.convert(QueryBuilders.matchQuery("name", "laptop"), ctx);
 
         assertTrue(result instanceof UnresolvedQueryCall);
         UnresolvedQueryCall unresolved = (UnresolvedQueryCall) result;
-        assertTrue(unresolved.getQueryBuilder() instanceof org.opensearch.index.query.RegexpQueryBuilder);
+        assertTrue(unresolved.getQueryBuilder() instanceof org.opensearch.index.query.MatchQueryBuilder);
     }
 
     public void testEmptyRegistryReturnsUnresolvedForAnyQuery() throws ConversionException {
