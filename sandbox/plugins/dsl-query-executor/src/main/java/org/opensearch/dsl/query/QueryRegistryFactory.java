@@ -27,6 +27,7 @@ public class QueryRegistryFactory {
         registry.register(new RangeQueryTranslator());
         registry.register(new PrefixQueryTranslator());
         registry.register(new WildcardQueryTranslator());
+        registry.register(new FuzzyQueryTranslator());
         // TODO: add other query translators
         return registry;
     }
