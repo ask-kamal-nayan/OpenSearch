@@ -30,6 +30,7 @@ public class QueryRegistryFactory {
         registry.register(new FuzzyQueryTranslator());
         registry.register(new IdsQueryTranslator());
         registry.register(new RegexpQueryTranslator());
+        registry.register(new BoolQueryTranslator(registry));
         // TODO: add other query translators
         return registry;
     }
