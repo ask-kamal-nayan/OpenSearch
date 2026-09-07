@@ -385,12 +385,12 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
         return nonNull;
     }
 
-//<<<<<<< HEAD
-//    private synchronized BinaryPageReader binaryReaderFor(FieldInfo field, boolean repeated) throws IOException {
-//        // Sorted iterators need instance-scoped cursors (shared producers are accessed
-//        // concurrently), so each gets a dedicated reader with instance-unique pool slots.
-//        DataFusionColumnReader reader = DataFusionColumnReader.openDeferred(
-//=======
+    // <<<<<<< HEAD
+    // private synchronized BinaryPageReader binaryReaderFor(FieldInfo field, boolean repeated) throws IOException {
+    // // Sorted iterators need instance-scoped cursors (shared producers are accessed
+    // // concurrently), so each gets a dedicated reader with instance-unique pool slots.
+    // DataFusionColumnReader reader = DataFusionColumnReader.openDeferred(
+    // =======
     /**
      * A dedicated (non-shared) column reader for one streaming iterator. Every value-reading
      * accessor (numeric, binary, sorted, sorted-set) routes here: under concurrent segment search

@@ -62,14 +62,15 @@ public final class UninvertedOrdinals implements Closeable {
     // PORF = parquet ord file footer magic.
     private static final int ORD_FILE_FOOTER_MAGIC = 0x504F5246; // "PORF"
 
-    private record OrdFileMetadata(
-        int maxDoc, // Number of document slots encoded in the payload.
+    private record OrdFileMetadata(int maxDoc, // Number of document slots encoded in the payload.
         long termCount, // Distinct term count for this segment field.
         long assignedDocs, // Number of docs that actually received a non-missing ord during build.
         int checkpointInterval // Checkpoint spacing persisted with the file for layout validation.
-    ) {}
+    ) {
+    }
 
-    private record LoadedOrdFile(IndexInput input, IndexInput payloadInput, LongValues ords, BytesRef[] checkpoints, long sizeInBytes) {}
+    private record LoadedOrdFile(IndexInput input, IndexInput payloadInput, LongValues ords, BytesRef[] checkpoints, long sizeInBytes) {
+    }
 
     private static final class InvalidOrdFileException extends IOException {
         private InvalidOrdFileException(String message) {
@@ -237,7 +238,6 @@ public final class UninvertedOrdinals implements Closeable {
         return DirectWriter.bytesRequired(maxDoc, (int) bits) + 1024L + checkpointEstimate;
     }
 
-
     private static String coverageMismatchMessage(String fileKey, long assignedDocs, long expectedNonNullDocs) {
         return "ordinal coverage mismatch for "
             + fileKey
@@ -252,7 +252,6 @@ public final class UninvertedOrdinals implements Closeable {
     private static long packedPayloadLength(int maxDoc, int bits) {
         return DirectWriter.bytesRequired(maxDoc, bits);
     }
-
 
     private static void writeOrdFileHeader(IndexOutput out, int maxDoc, long termCount, long assignedDocs, int checkpointInterval)
         throws IOException {

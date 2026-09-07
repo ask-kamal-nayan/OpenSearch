@@ -33,7 +33,7 @@ public class UninvertedOrdinalsTests extends OpenSearchTestCase {
         String fileKey = "reload";
 
         try (Directory dir = newDirectory(); RandomIndexWriter writer = new RandomIndexWriter(random(), dir)) {
-            final int termCount = UninvertedOrdinals.CHECKPOINT_INTERVAL + 128;
+            final int termCount = ParquetDocValuesProducer.checkpointInterval() + 128;
             for (int i = 0; i < termCount; i++) {
                 Document doc = new Document();
                 doc.add(new StringField("f", termValue(i), Field.Store.NO));
@@ -46,7 +46,9 @@ public class UninvertedOrdinalsTests extends OpenSearchTestCase {
                 Terms baseTerms = leaf.terms("f");
                 assertNotNull(baseTerms);
 
-                try (UninvertedOrdinals built = UninvertedOrdinals.build(ordsDir, fileKey, baseTerms, leaf.maxDoc(), termCount, () -> false)) {
+                try (
+                    UninvertedOrdinals built = UninvertedOrdinals.build(ordsDir, fileKey, baseTerms, leaf.maxDoc(), termCount, () -> false)
+                ) {
                     assertEquals(termCount, built.valueCount());
                     assertEquals(0, built.ordinal(0));
                     assertEquals(termCount - 1, built.ordinal(termCount - 1));
@@ -54,13 +56,28 @@ public class UninvertedOrdinalsTests extends OpenSearchTestCase {
 
                 AtomicInteger iteratorCalls = new AtomicInteger();
                 Terms countingTerms = countingTerms(baseTerms, iteratorCalls);
-                try (UninvertedOrdinals reloaded = UninvertedOrdinals.build(ordsDir, fileKey, countingTerms, leaf.maxDoc(), termCount, () -> false)) {
+                try (
+                    UninvertedOrdinals reloaded = UninvertedOrdinals.build(
+                        ordsDir,
+                        fileKey,
+                        countingTerms,
+                        leaf.maxDoc(),
+                        termCount,
+                        () -> false
+                    )
+                ) {
                     assertEquals("existing .ord should load without rebuilding checkpoints", 0, iteratorCalls.get());
                     assertEquals(termCount, reloaded.valueCount());
                     assertEquals(termCount - 1, reloaded.ordinal(termCount - 1));
-                    assertEquals(termValue(UninvertedOrdinals.CHECKPOINT_INTERVAL + 5), reloaded.term(UninvertedOrdinals.CHECKPOINT_INTERVAL + 5).utf8ToString());
+                    assertEquals(
+                        termValue(ParquetDocValuesProducer.checkpointInterval() + 5),
+                        reloaded.term(ParquetDocValuesProducer.checkpointInterval() + 5).utf8ToString()
+                    );
                     assertEquals(1, iteratorCalls.get());
-                    assertEquals(UninvertedOrdinals.CHECKPOINT_INTERVAL + 5, reloaded.rank(new BytesRef(termValue(UninvertedOrdinals.CHECKPOINT_INTERVAL + 5))));
+                    assertEquals(
+                        ParquetDocValuesProducer.checkpointInterval() + 5,
+                        reloaded.rank(new BytesRef(termValue(ParquetDocValuesProducer.checkpointInterval() + 5)))
+                    );
                 }
             }
         }
@@ -93,7 +110,9 @@ public class UninvertedOrdinalsTests extends OpenSearchTestCase {
 
                 AtomicInteger iteratorCalls = new AtomicInteger();
                 Terms countingTerms = countingTerms(baseTerms, iteratorCalls);
-                try (UninvertedOrdinals rebuilt = UninvertedOrdinals.build(ordsDir, fileKey, countingTerms, leaf.maxDoc(), 3, () -> false)) {
+                try (
+                    UninvertedOrdinals rebuilt = UninvertedOrdinals.build(ordsDir, fileKey, countingTerms, leaf.maxDoc(), 3, () -> false)
+                ) {
                     assertTrue("corrupt assignedDocs metadata should force rebuild", iteratorCalls.get() > 0);
                     assertEquals("beta", rebuilt.term(1).utf8ToString());
                     assertEquals(2, rebuilt.rank(new BytesRef("gamma")));
