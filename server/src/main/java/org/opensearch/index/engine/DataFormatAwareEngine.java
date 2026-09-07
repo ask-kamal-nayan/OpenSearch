@@ -281,6 +281,15 @@ public class DataFormatAwareEngine implements Indexer {
                     + "); use a segment-consuming or read-only engine"
             );
         }
+        if (engineConfig.getPrimaryOperationPolicy() != DefaultPrimaryOperationPolicy.INSTANCE) {
+            throw new IllegalStateException(
+                "DataFormatAwareEngine does not support primary operation policy ["
+                    + engineConfig.getPrimaryOperationPolicy()
+                    + "] requested for shard ["
+                    + engineConfig.getShardId()
+                    + "]; pluggable data format cannot be combined with a non-default primary operation policy"
+            );
+        }
         this.logger = Loggers.getLogger(DataFormatAwareEngine.class, engineConfig.getShardId());
         this.engineConfig = engineConfig;
         this.shardId = engineConfig.getShardId();
@@ -714,6 +723,11 @@ public class DataFormatAwareEngine implements Indexer {
             });
             Writer currentWriter = lockedWriter.get();
             currentWriter.updateMappingVersion(mappingVersion);
+            if (currentWriter.state() != WriterState.ACTIVE) {
+                writerCheckedOut = retireWriterIfNeeded(lockedWriter);
+                lockedWriter = null;
+                return indexIntoEngine(index, plan);
+            }
             // Writer pool must never return null — it creates on demand via the supplier
             assert index.seqNo() >= 0 : "seqNo must be assigned before writing but was: " + index.seqNo();
             assert index.primaryTerm() > 0 : "primaryTerm must be positive but was: " + index.primaryTerm();
@@ -2181,7 +2195,8 @@ public class DataFormatAwareEngine implements Indexer {
             return searchable.directoryReader();
         }
         throw new IllegalStateException(
-            "Lucene format reader " + luceneReaderObj.getClass().getName()
+            "Lucene format reader "
+                + luceneReaderObj.getClass().getName()
                 + " does not implement SearchableDirectoryReaderProvider; cannot build searcher"
         );
     }

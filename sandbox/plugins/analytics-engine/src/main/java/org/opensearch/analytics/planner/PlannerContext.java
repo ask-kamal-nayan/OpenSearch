@@ -277,6 +277,10 @@ public class PlannerContext {
         return plannerSettings.getOversamplingFactor();
     }
 
+    public int getMaxFilterPredicateCount() {
+        return plannerSettings.getMaxFilterPredicateCount();
+    }
+
     public OpenSearchDistributionTraitDef getDistributionTraitDef() {
         return distributionTraitDef;
     }

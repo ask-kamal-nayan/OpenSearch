@@ -20,6 +20,8 @@ _search request
 - **Match All Query** - Match all documents
 - **Range Query** - Numeric and date range queries with full date math support
 - **Bool Query** - Compound query with `must`, `should`, `must_not`, `filter` and `minimum_should_match`
+- **Prefix Query** - Prefix matching via Calcite LIKE with wildcard suffix
+- **Wildcard Query** - Wildcard pattern matching via Calcite LIKE
 
 ### Range Query Features
 - **Operators**: `gte`, `gt`, `lte`, `lt`
@@ -67,7 +69,35 @@ Converts to Calcite logical expressions with full support for all clauses and `m
 }
 ```
 
-## Supported Queries
+**minimum_should_match formats:**
+- Non-negative integer: `"2"` - exactly 2 clauses must match
+- Negative integer: `"-1"` - total minus 1 must match
+- Non-negative percentage: `"70%"` - 70% of clauses (rounded down)
+- Negative percentage: `"-30%"` - can miss 30% of clauses
+- Single combination: `"2<75%"` - if total ≤ 2 match all, else 75%
+- Multiple combinations: `"3<-1 5<50%"` - threshold-based rules
+
+**Example:**
+```json
+{
+  "bool": {
+    "must": [
+      {"term": {"status": "active"}}
+    ],
+    "should": [
+      {"term": {"priority": "high"}},
+      {"term": {"priority": "medium"}},
+      {"term": {"priority": "low"}}
+    ],
+    "must_not": [
+      {"term": {"deleted": "true"}}
+    ],
+    "minimum_should_match": "2"
+  }
+}
+```
+
+### Calcite Representation
 
 | DSL Query | Calcite Representation |
 |-----------|------------------------|

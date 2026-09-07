@@ -12,9 +12,11 @@ import org.opensearch.action.support.ActionFilter;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.settings.ClusterSettings;
 import org.opensearch.common.settings.Settings;
-import org.opensearch.dsl.action.DslExecuteAction;
+import org.opensearch.dsl.action.ExecuteAction;
 import org.opensearch.dsl.action.SearchActionFilter;
-import org.opensearch.dsl.action.TransportDslExecuteAction;
+import org.opensearch.dsl.action.TransportExecuteAction;
+import org.opensearch.dsl.action.TransportValidateAction;
+import org.opensearch.dsl.action.ValidateAction;
 import org.opensearch.plugins.ActionPlugin;
 import org.opensearch.test.OpenSearchTestCase;
 import org.opensearch.transport.client.node.NodeClient;
@@ -60,9 +62,16 @@ public class DslQueryExecutorPluginTests extends OpenSearchTestCase {
     public void testRegistersTransportAction() {
         var actions = plugin.getActions();
 
-        assertEquals(1, actions.size());
-        ActionPlugin.ActionHandler<?, ?> handler = actions.get(0);
-        assertEquals(DslExecuteAction.INSTANCE, handler.getAction());
-        assertEquals(TransportDslExecuteAction.class, handler.getTransportAction());
+        assertEquals(2, actions.size());
+        ActionPlugin.ActionHandler<?, ?> execute = actions.stream()
+            .filter(h -> h.getAction() == ExecuteAction.INSTANCE)
+            .findFirst()
+            .orElseThrow();
+        assertEquals(TransportExecuteAction.class, execute.getTransportAction());
+        ActionPlugin.ActionHandler<?, ?> validate = actions.stream()
+            .filter(h -> h.getAction() == ValidateAction.INSTANCE)
+            .findFirst()
+            .orElseThrow();
+        assertEquals(TransportValidateAction.class, validate.getTransportAction());
     }
 }

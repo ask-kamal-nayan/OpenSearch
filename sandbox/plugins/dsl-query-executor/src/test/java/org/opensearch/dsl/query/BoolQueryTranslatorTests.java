@@ -25,6 +25,7 @@ import org.opensearch.index.query.QueryBuilders;
 import org.opensearch.test.OpenSearchTestCase;
 
 import java.util.List;
+import java.util.Locale;
 
 public class BoolQueryTranslatorTests extends OpenSearchTestCase {
 
@@ -862,7 +863,7 @@ public class BoolQueryTranslatorTests extends OpenSearchTestCase {
         BoolQueryBuilder query = QueryBuilders.boolQuery().must(QueryBuilders.termQuery("created_date", 19738));
 
         ConversionException ex = expectThrows(ConversionException.class, () -> translator.convert(query, ctx));
-        assertTrue("Message must identify date fields", ex.getMessage().toLowerCase().contains("date field"));
+        assertTrue("Message must identify date fields", ex.getMessage().toLowerCase(Locale.ROOT).contains("date field"));
         assertTrue("Message must name the offending field", ex.getMessage().contains("created_date"));
     }
 
