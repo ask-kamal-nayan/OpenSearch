@@ -151,6 +151,12 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
 
     private final BufferPool bufferPool = new BufferPool();
     private final Map<String, DataFusionColumnReader> dataFusionColumnReaders = new java.util.concurrent.ConcurrentHashMap<>();
+    /**
+     * Memoised physical column shape per field, so the routing decision in the leaf reader costs one
+     * FFM call per column per segment rather than one per search. Immutable for a segment's lifetime:
+     * the Parquet file backing it never changes shape once written.
+     */
+    private final Map<String, Boolean> repeatedColumns = new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.List<java.io.Closeable> dedicatedReaders = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
 
     /** Optional per-query accumulator; propagated to each column reader so its stats roll up at close. */
@@ -322,6 +328,7 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
         }
         dedicatedReaders.clear();
         dataFusionColumnReaders.clear();
+        repeatedColumns.clear();
         bufferPool.close();
         if (first != null) {
             throw first;
@@ -372,6 +379,30 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
      * per-page null counts; {@code -1} when any page lacks the statistic. Used to verify that
      * postings-derived ordinal tables cover every stored value.
      */
+    /**
+     * Whether {@code field}'s column is physically repeated (a Parquet LIST) in this segment.
+     *
+     * <p>Read from the file's own schema rather than the mapping, because the two disagree exactly
+     * where it matters: once a field is promoted from scalar to LIST the mapping says LIST for every
+     * segment, while segments written before the promotion are still scalar on disk. Routing on the
+     * mapping would hand those older scalar columns to the repeated reader and fail
+     * {@code check_column_shape} in the native layer.
+     *
+     * <p>Uses the shared metadata reader — {@code isPhysicallyRepeated} never advances the native
+     * cursor — and memoises, since a segment's shape is fixed once written. The {@code false} passed
+     * to {@link #dataFusionReaderFor} is only the requested batch entry point, which is irrelevant
+     * for a reader that is never iterated.
+     */
+    boolean isRepeated(FieldInfo field) throws IOException {
+        Boolean cached = repeatedColumns.get(field.getName());
+        if (cached != null) {
+            return cached;
+        }
+        boolean repeated = dataFusionReaderFor(field, false).isPhysicallyRepeated();
+        repeatedColumns.put(field.getName(), repeated);
+        return repeated;
+    }
+
     long nonNullRowCount(FieldInfo field) throws IOException {
         org.opensearch.parquet.codec.cache.ColumnPageIndex idx = dataFusionReaderFor(field, false).pageIndex();
         long nonNull = 0;

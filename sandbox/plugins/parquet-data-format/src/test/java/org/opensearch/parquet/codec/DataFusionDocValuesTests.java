@@ -13,6 +13,7 @@ import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.BigIntVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.complex.ListVector;
 import org.apache.arrow.vector.complex.impl.UnionListWriter;
@@ -111,6 +112,71 @@ public class DataFusionDocValuesTests extends OpenSearchTestCase {
         }
 
         assertEquals(dataFusionReadersBefore, RustBridge.dfOpenIterCount());
+    }
+
+    /**
+     * The routing decision in {@link ParquetDocValuesLeafReader#getSortedNumericDocValues} must come
+     * from the column's physical shape in the file, not from its declared Lucene doc-values type or
+     * the mapping. Both columns below are declared {@code SORTED_NUMERIC}; only one is physically a
+     * LIST, so an implementation that consulted the declared type would report both as repeated.
+     */
+    public void testIsRepeatedReflectsPhysicalColumnShapeNotDeclaredType() throws Exception {
+        Path directoryPath = createTempDir();
+        Path repeatedFile = directoryPath.resolve("repeated-shape.parquet");
+        Path scalarFile = directoryPath.resolve("scalar-shape.parquet");
+        writeRepeatedFile(repeatedFile);
+        writeScalarFile(scalarFile);
+
+        FieldInfo numbers = fieldInfo("numbers", 0, DocValuesType.SORTED_NUMERIC);
+        FieldInfo tags = fieldInfo("tags", 1, DocValuesType.SORTED_SET);
+        FieldInfo plain = fieldInfo("plain", 0, DocValuesType.SORTED_NUMERIC);
+
+        try (
+            FSDirectory directory = FSDirectory.open(directoryPath);
+            ParquetDocValuesProducer producer = new ParquetDocValuesProducer(segmentReadState(directory, repeatedFile, numbers, tags), null)
+        ) {
+            assertTrue("LIST numeric column must report repeated", producer.isRepeated(numbers));
+            assertTrue("LIST binary column must report repeated", producer.isRepeated(tags));
+            // Memoised: a second call must agree with the first.
+            assertTrue(producer.isRepeated(numbers));
+        }
+
+        try (
+            FSDirectory directory = FSDirectory.open(directoryPath);
+            ParquetDocValuesProducer producer = new ParquetDocValuesProducer(segmentReadState(directory, scalarFile, plain), null)
+        ) {
+            assertFalse("scalar column must not report repeated despite a SORTED_NUMERIC dv type", producer.isRepeated(plain));
+        }
+    }
+
+    /** A file whose only column is a plain (non-LIST) int64, for the scalar side of shape detection. */
+    private void writeScalarFile(Path file) throws Exception {
+        Schema schema = new Schema(List.of(new Field("plain", FieldType.nullable(new ArrowType.Int(64, true)), null)));
+
+        NativeParquetWriter writer = new NativeParquetWriter(file.toString());
+        try (ArrowExport schemaExport = exportSchema(schema)) {
+            writer.initialize("test-index", schemaExport.getSchemaAddress(), ParquetSortConfig.empty(), 0L);
+        }
+        try (ArrowExport dataExport = exportScalarData(schema)) {
+            writer.write(dataExport.getArrayAddress(), dataExport.getSchemaAddress());
+        }
+        writer.flush();
+    }
+
+    private ArrowExport exportScalarData(Schema schema) {
+        try (VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
+            BigIntVector vector = (BigIntVector) root.getVector("plain");
+            for (int row = 0; row < ROW_COUNT; row++) {
+                vector.setSafe(row, 10L * (row + 1));
+            }
+            vector.setValueCount(ROW_COUNT);
+            root.setRowCount(ROW_COUNT);
+
+            ArrowArray array = ArrowArray.allocateNew(allocator);
+            ArrowSchema arrowSchema = ArrowSchema.allocateNew(allocator);
+            Data.exportVectorSchemaRoot(allocator, root, null, array, arrowSchema);
+            return new ArrowExport(array, arrowSchema);
+        }
     }
 
     private void writeRepeatedFile(Path file) throws Exception {

@@ -65,6 +65,7 @@ public class RustBridge {
     private static final MethodHandle DF_RESET_ITER;
     private static final MethodHandle DF_OPEN_ITER_COUNT;
     private static final MethodHandle DF_ROW_COUNT;
+    private static final MethodHandle DF_IS_REPEATED;
     private static final MethodHandle DF_PAGE_COUNT;
     private static final MethodHandle DF_PAGE_INDEX;
     private static final MethodHandle DF_DIAGNOSTICS_RESET;
@@ -344,6 +345,10 @@ public class RustBridge {
         );
         DF_ROW_COUNT = linker.downcallHandle(
             lib.find("parquet_df_row_count").orElseThrow(),
+            FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG)
+        );
+        DF_IS_REPEATED = linker.downcallHandle(
+            lib.find("parquet_df_is_repeated").orElseThrow(),
             FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG)
         );
         DF_PAGE_COUNT = linker.downcallHandle(
@@ -932,6 +937,15 @@ public class RustBridge {
     /** Total physical rows visible to the retained cursor. */
     static long dfRowCount(long handle) throws IOException {
         return invokeChecked(DF_ROW_COUNT, handle);
+    }
+
+    /**
+     * Whether the cursor's column is physically repeated (a Parquet LIST): {@code 1} repeated,
+     * {@code 0} scalar. Read from the file's schema, so it reflects the segment on disk rather
+     * than the current mapping, which may already say LIST for files written before a promotion.
+     */
+    static long dfIsRepeated(long handle) throws IOException {
+        return invokeChecked(DF_IS_REPEATED, handle);
     }
 
     /** Number of OffsetIndex pages for the cursor's projected column. */

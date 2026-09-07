@@ -300,6 +300,12 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
     public NumericDocValues getNumericDocValues(String field) throws IOException {
         FieldInfo fi = parquetFieldInfo(field);
         if (fi != null && fi.getDocValuesType() == DocValuesType.NUMERIC) {
+            // NOTE: a physically repeated (LIST) column reaching here — a caller that wants a plain
+            // single-valued view, e.g. some sort or script paths — cannot be served correctly, since
+            // there is no single value per document. It surfaces as the native check_column_shape
+            // error rather than a wrong answer, which is the intended outcome: deliberately left to
+            // fail loudly instead of silently returning the empty Lucene delegate. Callers that can
+            // handle multiple values must request SORTED_NUMERIC, which routes on physical shape.
             RowIdResolver resolver = newRowIdResolver();
             NumericDocValues numeric = producer().getNumeric(fi);
             // IDENTITY (the guaranteed case — see newRowIdResolver) means docId == Parquet row, so the
@@ -313,6 +319,23 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
     public SortedNumericDocValues getSortedNumericDocValues(String field) throws IOException {
         FieldInfo fi = parquetFieldInfo(field);
         if (fi != null) {
+            // Genuinely multi-valued columns must go through the repeated reader. Decide on the
+            // column's PHYSICAL shape in this segment, never on the mapping: after a scalar-to-LIST
+            // promotion the mapping reports LIST for every segment while files written before the
+            // promotion are still scalar, so a mapping-based branch would send those to the repeated
+            // reader and fail check_column_shape in the native layer. One memoised FFM call per
+            // column per segment answers it.
+            FieldInfo asSortedNumeric = fi.getDocValuesType() == DocValuesType.SORTED_NUMERIC
+                ? fi
+                : newDocValuesFieldInfo(field, fi.number, DocValuesType.SORTED_NUMERIC, fi.docValuesSkipIndexType());
+            if (producer().isRepeated(asSortedNumeric)) {
+                SortedNumericDocValues sortedNumeric = producer().getSortedNumeric(asSortedNumeric);
+                RowIdResolver repeatedResolver = newRowIdResolver();
+                return repeatedResolver == RowIdResolver.IDENTITY
+                    ? sortedNumeric
+                    : RowIdRemappingDocValues.sortedNumeric(sortedNumeric, repeatedResolver, maxDoc());
+            }
+
             // OpenSearch numeric value sources request SORTED_NUMERIC even for single-valued fields,
             // then call DocValues.unwrapSingleton(...) to take a leaner single-valued collector when
             // possible. We therefore serve single-valued numerics through the CACHED single-valued
@@ -321,12 +344,6 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
             // DocValues.singleton(...) so the returned value is a real SingletonSortedNumericDocValues
             // that unwrapSingleton(...) can detect. This wins on two layers: the PageCache (no per-doc
             // FFM call) and the aggregator's single-valued fast path.
-            //
-            // TODO(multi-value): this intentionally treats every numeric field as single-valued and so
-            // breaks true multi-valued (array) numeric fields. Restore the repeated path for genuinely
-            // multi-valued columns (e.g. branch on the Parquet column's repetition level) and return
-            // RowIdRemappingDocValues.sortedNumeric(producer().getSortedNumeric(asSortedNumeric),
-            // newRowIdResolver(), maxDoc()) for those.
             FieldInfo asNumeric = fi.getDocValuesType() == DocValuesType.NUMERIC
                 ? fi
                 : newDocValuesFieldInfo(field, fi.number, DocValuesType.NUMERIC, fi.docValuesSkipIndexType());

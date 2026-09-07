@@ -1052,6 +1052,26 @@ pub unsafe extern "C" fn parquet_df_row_count(handle: i64) -> i64 {
     Ok(row_count)
 }
 
+/// Reports whether the cursor's projected column is physically repeated (a Parquet LIST):
+/// `1` when repeated, `0` when scalar.
+///
+/// Derived from the file's own schema when the cursor was opened, so it describes what is
+/// actually on disk rather than what the current mapping says. The two diverge after a
+/// scalar-to-LIST promotion: the mapping reports LIST while files written earlier remain
+/// scalar. Callers must therefore route per segment on this value, not on the mapping, or
+/// they will hand a scalar column to the repeated reader (and vice versa) and trip
+/// `check_column_shape`.
+#[ffm_safe]
+#[no_mangle]
+pub unsafe extern "C" fn parquet_df_is_repeated(handle: i64) -> i64 {
+    let cursor = CURSORS
+        .get(&handle)
+        .map(|entry| Arc::clone(entry.value()))
+        .ok_or_else(|| format!("parquet_df_is_repeated: unknown handle {handle}"))?;
+    let repeated = cursor.lock().repeated;
+    Ok(if repeated { 1 } else { 0 })
+}
+
 #[ffm_safe]
 #[no_mangle]
 pub unsafe extern "C" fn parquet_df_page_count(handle: i64) -> i64 {

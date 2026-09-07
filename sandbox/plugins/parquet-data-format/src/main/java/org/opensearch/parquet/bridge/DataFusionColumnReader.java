@@ -207,6 +207,22 @@ public final class DataFusionColumnReader implements Closeable, NumericPageReade
         return pageIndex;
     }
 
+    /**
+     * Whether this column is physically a Parquet LIST in the file backing this reader.
+     *
+     * <p>Deliberately distinct from the {@code repeated} constructor flag, which records the shape
+     * the <em>caller asked for</em> when choosing a batch entry point. This method reports the shape
+     * the file actually has, read from its schema. The two diverge after a scalar-to-LIST promotion:
+     * the mapping (and hence callers derived from it) say LIST while segments written before the
+     * promotion are still scalar. Routing decisions must use this, per segment.
+     *
+     * <p>Metadata only — it never advances the native cursor, so it is safe to call on the shared
+     * reader rather than a dedicated one.
+     */
+    public boolean isPhysicallyRepeated() throws IOException {
+        return RustBridge.dfIsRepeated(handle()) != 0;
+    }
+
     @Override
     public PageCache cache() {
         return cache;
