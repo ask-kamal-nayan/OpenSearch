@@ -138,6 +138,8 @@ public class NumberFieldMapper extends ParametrizedFieldMapper {
 
         private final Parameter<Map<String, String>> meta = Parameter.metaParam();
 
+        private final Parameter<MappedFieldType.MultiValueState> multiValue = multiValueParameter();
+
         private final NumberType type;
 
         public Builder(String name, NumberType type, Settings settings) {
@@ -182,7 +184,7 @@ public class NumberFieldMapper extends ParametrizedFieldMapper {
 
         @Override
         protected List<Parameter<?>> getParameters() {
-            return Arrays.asList(indexed, hasDocValues, stored, skiplist, ignoreMalformed, coerce, nullValue, meta);
+            return Arrays.asList(indexed, hasDocValues, stored, skiplist, ignoreMalformed, coerce, nullValue, meta, multiValue);
         }
 
         @Override
@@ -1963,6 +1965,8 @@ public class NumberFieldMapper extends ParametrizedFieldMapper {
                 builder.nullValue.getValue(),
                 builder.meta.getValue()
             );
+            setMultiValueState(builder.multiValue.getValue());
+            setMultiValueSupported(true);
         }
 
         public NumberFieldType(String name, NumberType type) {
@@ -2187,7 +2191,7 @@ public class NumberFieldMapper extends ParametrizedFieldMapper {
         if (numericValue == null) {
             return;
         }
-        context.documentInput().addField(fieldType(), numericValue);
+        addFieldForPluggableFormat(context, numericValue);
     }
 
     @Override

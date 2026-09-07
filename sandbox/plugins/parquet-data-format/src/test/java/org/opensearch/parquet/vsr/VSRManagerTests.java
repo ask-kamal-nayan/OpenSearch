@@ -32,6 +32,7 @@ import org.opensearch.parquet.bridge.RustBridge;
 import org.opensearch.parquet.engine.ParquetDataFormat;
 import org.opensearch.parquet.fields.ParquetField;
 import org.opensearch.parquet.fields.core.data.number.IntegerParquetField;
+import org.opensearch.parquet.fields.core.data.number.TokenCountParquetField;
 import org.opensearch.parquet.fields.core.data.text.KeywordParquetField;
 import org.opensearch.parquet.memory.ArrowBufferPool;
 import org.opensearch.parquet.writer.ParquetDocumentInput;
@@ -629,15 +630,82 @@ public class VSRManagerTests extends ParquetBaseTests {
         }
     }
 
-    public void testMultiValueNumericFieldIsRejected() {
+    public void testMultiValueIntegerFieldWritesListColumn() throws Exception {
+        String filePath = createTempDir().resolve("multi-value-int.parquet").toString();
+        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 100, threadPool, 0L);
+        try {
+            // Mapping update introduces an integer field declared multi-valued, so it arrives as a
+            // LIST<Int(32)> rather than a flat Int column.
+            manager.reconcileSchema(schemaWithMultiValueInt("scores"));
+
+            NumberFieldMapper.NumberFieldType scores = new NumberFieldMapper.NumberFieldType(
+                "scores",
+                NumberFieldMapper.NumberType.INTEGER
+            );
+            scores.setMultiValued(true);
+            assignTestCapabilities(scores, PARQUET_FORMAT);
+
+            // Row 0: three values including a duplicate, proving duplicates survive and are not
+            // deduplicated on the way in. Row 1: field absent. Row 2: a single value, which must
+            // still be stored as a one-element list.
+            ParquetDocumentInput doc0 = new ParquetDocumentInput();
+            populateMetadataFields(doc0);
+            doc0.setRowId(DocumentInput.ROW_ID_FIELD, 0);
+            doc0.addField(scores, 20);
+            doc0.addField(scores, 10);
+            doc0.addField(scores, 20);
+            manager.addDocument(doc0);
+
+            ParquetDocumentInput doc1 = new ParquetDocumentInput();
+            populateMetadataFields(doc1);
+            doc1.setRowId(DocumentInput.ROW_ID_FIELD, 1);
+            manager.addDocument(doc1);
+
+            ParquetDocumentInput doc2 = new ParquetDocumentInput();
+            populateMetadataFields(doc2);
+            doc2.setRowId(DocumentInput.ROW_ID_FIELD, 2);
+            doc2.addField(scores, 30);
+            manager.addDocument(doc2);
+
+            ListVector listVector = (ListVector) manager.getActiveManagedVSR().getVector("scores");
+            assertEquals(List.of(20, 10, 20), intListElements(listVector, 0));
+            assertTrue("absent field must read back as a null list", listVector.isNull(1));
+            assertEquals(List.of(30), intListElements(listVector, 2));
+
+            ParquetFileMetadata metadata = manager.flush();
+            assertNotNull(metadata);
+            assertEquals(3, metadata.numRows());
+        } finally {
+            manager.close();
+        }
+    }
+
+    public void testMultiValueUnsupportedNumericFieldIsRejected() {
+        // token_count is backed by TokenCountFieldMapper rather than NumberFieldMapper, so it is
+        // deliberately left scalar-only: nothing can declare it multi-valued.
         IllegalArgumentException error = expectThrows(
             IllegalArgumentException.class,
-            () -> new IntegerParquetField().toArrowField("numbers", true)
+            () -> new TokenCountParquetField().toArrowField("numbers", true)
         );
         assertEquals(
-            "Field [numbers] cannot be stored as multi-valued: type [IntegerParquetField] does not support list storage",
+            "Field [numbers] cannot be stored as multi-valued: type [TokenCountParquetField] does not support list storage",
             error.getMessage()
         );
+    }
+
+    public void testIntegerParquetFieldSupportsMultiValue() {
+        IntegerParquetField field = new IntegerParquetField();
+        assertTrue(field.supportsMultiValue());
+
+        Field listField = field.toArrowField("numbers", true);
+        assertEquals("numbers", listField.getName());
+        assertEquals(ArrowType.List.INSTANCE, listField.getType());
+        assertEquals(1, listField.getChildren().size());
+
+        Field element = listField.getChildren().get(0);
+        assertEquals(ParquetField.LIST_ELEMENT_NAME, element.getName());
+        assertEquals(new ArrowType.Int(32, true), element.getType());
+        assertTrue("list elements must stay nullable so [1, null] remains legal", element.isNullable());
     }
 
     public void testMultiValueFieldWritesEmptyListDistinctFromAbsent() throws Exception {
@@ -733,10 +801,28 @@ public class VSRManagerTests extends ParquetBaseTests {
     }
 
     /** Test schema plus metadata fields plus a keyword field declared multi-valued. */
+    private static List<Integer> intListElements(ListVector listVector, int row) {
+        int start = listVector.getOffsetBuffer().getInt((long) row * 4);
+        int end = listVector.getOffsetBuffer().getInt((long) (row + 1) * 4);
+        IntVector data = (IntVector) listVector.getDataVector();
+        List<Integer> values = new ArrayList<>(end - start);
+        for (int i = start; i < end; i++) {
+            values.add(data.get(i));
+        }
+        return values;
+    }
+
     private Schema schemaWithMultiValue(String name) {
         List<Field> fields = new ArrayList<>(schema.getFields());
         fields.addAll(metadataFields());
         fields.add(new KeywordParquetField().toArrowField(name, true));
+        return new Schema(fields);
+    }
+
+    private Schema schemaWithMultiValueInt(String name) {
+        List<Field> fields = new ArrayList<>(schema.getFields());
+        fields.addAll(metadataFields());
+        fields.add(new IntegerParquetField().toArrowField(name, true));
         return new Schema(fields);
     }
 
