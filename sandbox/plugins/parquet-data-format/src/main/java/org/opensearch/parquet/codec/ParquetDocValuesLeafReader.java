@@ -169,8 +169,29 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
                 continue;
             }
             FieldTypeMapping.Mapping mapping = FieldTypeMapping.forType(mft.typeName());
-            DocValuesType dvType = mapping.singleValued();
-            FieldInfo synthetic = newDocValuesFieldInfo(name, ++maxNumber, dvType, skipIndexTypeFor(mapping));
+            // Declare the doc-values type the field is CAPABLE of holding, not the single-valued one.
+            // Lucene's FieldExistsQuery dispatches on this declaration, so a multi-valued column
+            // declared NUMERIC sends `exists` to the single-valued getter, which finds no values and
+            // silently reports that no document has the field. Aggregations are unaffected either way
+            // because numeric and keyword value sources request SORTED_NUMERIC / SORTED_SET regardless
+            // of what is declared here.
+            //
+            // Deriving this from the mapping is sound even though ROUTING must be physical and
+            // per-segment: multi-value state is monotonic — AUTO or SCALAR promotes to LIST and never
+            // back, enforced by the multi_value parameter's merge validator — so the declaration can
+            // only ever be wider than the file on disk, never narrower. The getters then narrow it:
+            // getSortedNumericDocValues inspects the column's physical shape and serves a still-scalar
+            // segment through the singleton path. This relies on the promotion reaching the mapping
+            // before the segment holding the first LIST column becomes searchable; were that ever
+            // reordered, exists would route to the single-valued getter and fail loudly in the native
+            // shape check rather than return a wrong answer.
+            //
+            // Fall back to the single-valued type when a mapping declares no multi-valued counterpart
+            // (text and binary map it to NONE). Without this, wiring multi_value onto such a type would
+            // synthesize a doc-values-less FieldInfo and silently drop the field from exists.
+            boolean multiValued = mft.isMultiValued() && mapping.multiValued() != DocValuesType.NONE;
+            DocValuesType dvType = multiValued ? mapping.multiValued() : mapping.singleValued();
+            FieldInfo synthetic = newDocValuesFieldInfo(name, ++maxNumber, dvType, skipIndexTypeFor(mapping, multiValued));
             parquetFields.put(name, synthetic);
             // If a DV-less FieldInfo already exists for this field, replace it with the synthetic
             // one carrying the DV type; otherwise append.
@@ -196,7 +217,13 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
      * {@link ParquetDocValuesProducer#getSkipper}'s physical-type gate: declaring RANGE for a
      * field whose getSkipper returns null would break consumers that trust the declaration.
      */
-    private static DocValuesSkipIndexType skipIndexTypeFor(FieldTypeMapping.Mapping mapping) {
+    private static DocValuesSkipIndexType skipIndexTypeFor(FieldTypeMapping.Mapping mapping, boolean multiValued) {
+        // A repeated column forfeits the skipper regardless of physical type: getSkipper returns null
+        // for SORTED_NUMERIC because once values repeat, OffsetIndex page rows no longer bound Lucene
+        // documents, so declaring RANGE here would break consumers that trust the declaration.
+        if (multiValued) {
+            return DocValuesSkipIndexType.NONE;
+        }
         ParquetPhysicalType phys = mapping.physical();
         boolean skippable = phys == ParquetPhysicalType.INT32 || phys == ParquetPhysicalType.INT64 || phys == ParquetPhysicalType.BOOL;
         return skippable ? DocValuesSkipIndexType.RANGE : DocValuesSkipIndexType.NONE;
@@ -300,12 +327,11 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
     public NumericDocValues getNumericDocValues(String field) throws IOException {
         FieldInfo fi = parquetFieldInfo(field);
         if (fi != null && fi.getDocValuesType() == DocValuesType.NUMERIC) {
-            // NOTE: a physically repeated (LIST) column reaching here — a caller that wants a plain
-            // single-valued view, e.g. some sort or script paths — cannot be served correctly, since
-            // there is no single value per document. It surfaces as the native check_column_shape
-            // error rather than a wrong answer, which is the intended outcome: deliberately left to
-            // fail loudly instead of silently returning the empty Lucene delegate. Callers that can
-            // handle multiple values must request SORTED_NUMERIC, which routes on physical shape.
+            // A multi-valued field is declared SORTED_NUMERIC (see the FieldInfos synthesis above), so
+            // it does not enter this branch at all and falls through to the delegate, which correctly
+            // reports no single-valued doc values for it. That is the honest answer: a repeated column
+            // has no one value per document. Callers that can handle multiple values must request
+            // SORTED_NUMERIC, which routes on the column's physical shape.
             RowIdResolver resolver = newRowIdResolver();
             NumericDocValues numeric = producer().getNumeric(fi);
             // IDENTITY (the guaranteed case — see newRowIdResolver) means docId == Parquet row, so the
@@ -319,17 +345,22 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
     public SortedNumericDocValues getSortedNumericDocValues(String field) throws IOException {
         FieldInfo fi = parquetFieldInfo(field);
         if (fi != null) {
-            // Genuinely multi-valued columns must go through the repeated reader. Decide on the
-            // column's PHYSICAL shape in this segment, never on the mapping: after a scalar-to-LIST
-            // promotion the mapping reports LIST for every segment while files written before the
-            // promotion are still scalar, so a mapping-based branch would send those to the repeated
-            // reader and fail check_column_shape in the native layer. One memoised FFM call per
-            // column per segment answers it.
-            FieldInfo asSortedNumeric = fi.getDocValuesType() == DocValuesType.SORTED_NUMERIC
-                ? fi
-                : newDocValuesFieldInfo(field, fi.number, DocValuesType.SORTED_NUMERIC, fi.docValuesSkipIndexType());
-            if (producer().isRepeated(asSortedNumeric)) {
-                SortedNumericDocValues sortedNumeric = producer().getSortedNumeric(asSortedNumeric);
+            // Genuinely multi-valued columns must go through the repeated reader. Two conditions,
+            // deliberately in this order:
+            //
+            // 1. The DECLARATION must say SORTED_NUMERIC. Only a field the mapping declares
+            // multi-valued can have a repeated column, because the state is monotonic (see the
+            // FieldInfos synthesis above), so for a NUMERIC-declared field the probe could only
+            // ever answer "scalar". Checking this first keeps the probe -- and the eager native
+            // cursor open it forces -- entirely off the single-valued hot path, which is the
+            // overwhelming majority of fields and would otherwise open a cursor per column per
+            // segment even for columns a query never reads.
+            // 2. The PHYSICAL shape must actually be repeated. The declaration is only ever wider
+            // than the file: after a scalar-to-LIST promotion the mapping reports LIST for every
+            // segment while files written earlier are still scalar, so those must fall through to
+            // the singleton path below or they would trip check_column_shape in the native layer.
+            if (fi.getDocValuesType() == DocValuesType.SORTED_NUMERIC && producer().isRepeated(fi)) {
+                SortedNumericDocValues sortedNumeric = producer().getSortedNumeric(fi);
                 RowIdResolver repeatedResolver = newRowIdResolver();
                 return repeatedResolver == RowIdResolver.IDENTITY
                     ? sortedNumeric
@@ -438,10 +469,23 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
             // ParquetSortedDocValues), remap docId→row, and wrap with DocValues.singleton(...) so the
             // returned value is a real SingletonSortedSetDocValues that unwrapSingleton(...) detects.
             //
-            // TODO(multi-value): intentionally treats every keyword field as single-valued and so breaks
-            // true multi-valued (array) keyword fields. Restore the multi-valued path for genuinely
-            // repeated columns and return RowIdRemappingDocValues.sortedSet(
-            // producer().getSortedSet(asSortedSet), newRowIdResolver(), maxDoc()) for those.
+            // Genuinely repeated columns go to the sorted-set iterator instead, gated the same way as
+            // the numeric path: the declaration must say SORTED_SET (only a field the mapping declares
+            // multi-valued can be repeated, so probing a SORTED-declared field could only answer
+            // "scalar" while still forcing an eager native cursor open), and the physical shape must
+            // then confirm it, because the mapping says LIST for every segment once a field is
+            // promoted while segments written earlier are still scalar. Note that iterator's
+            // global-ordinal operations (getValueCount, lookupTerm) throw, so ordinal-based terms
+            // aggregations on a multi-valued keyword still fail fast toward execution_hint:map;
+            // presence and per-document value iteration work.
+            if (fi.getDocValuesType() == DocValuesType.SORTED_SET && producer().isRepeated(fi)) {
+                SortedSetDocValues sortedSet = producer().getSortedSet(fi);
+                RowIdResolver repeatedResolver = newRowIdResolver();
+                return repeatedResolver == RowIdResolver.IDENTITY
+                    ? sortedSet
+                    : RowIdRemappingDocValues.sortedSet(sortedSet, repeatedResolver, maxDoc());
+            }
+
             FieldInfo asSorted = fi.getDocValuesType() == DocValuesType.SORTED
                 ? fi
                 : newDocValuesFieldInfo(field, fi.number, DocValuesType.SORTED, fi.docValuesSkipIndexType());
