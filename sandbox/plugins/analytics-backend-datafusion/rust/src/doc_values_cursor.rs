@@ -207,10 +207,20 @@ fn liquid_cache() -> Option<liquid_cache_datafusion::LiquidCacheParquetRef> {
         .flatten()
 }
 
+/// Parquet file-level metadata key marking that a file's multi-valued values were sorted into
+/// read-path order at ingest, letting the Java read path skip its per-visit re-sort. Must match
+/// `parquet-data-format`'s `writer_properties_builder::VALUES_SORTED_KEY`.
+const VALUES_SORTED_KEY: &str = "opensearch.values_sorted";
+
 struct DocValuesCursor {
     reader: LiquidForwardBatchReader,
     physical_type: PhysicalType,
     repeated: bool,
+    /// Whether the file recorded that its multi-valued values were sorted into read-path order at
+    /// ingest (`opensearch.values_sorted` marker). Read from the file's own key-value metadata when
+    /// the cursor was opened; an absent marker (legacy/merged file) is `false`, so the Java reader
+    /// still sorts. See [`VALUES_SORTED_KEY`].
+    values_sorted: bool,
     row_count: i64,
     initial_batch_size: usize,
     batch_size: usize,
@@ -330,10 +340,24 @@ impl DocValuesCursor {
         let row_count = reader.row_count() as i64;
         let repeated = reader.is_repeated();
 
+        // Read-path sort skip: honoured only when the file explicitly recorded that its values were
+        // pre-sorted at ingest. An absent marker (legacy file, or merge output) reads as false, so
+        // the SortedNumeric/SortedSet iterators still sort — a missing check would make min/max
+        // silently wrong rather than fail loudly.
+        let values_sorted = footer
+            .file_metadata()
+            .key_value_metadata()
+            .map(|kvs| {
+                kvs.iter()
+                    .any(|kv| kv.key == VALUES_SORTED_KEY && kv.value.as_deref() == Some("true"))
+            })
+            .unwrap_or(false);
+
         Ok(Self {
             reader,
             physical_type,
             repeated,
+            values_sorted,
             row_count,
             initial_batch_size: batch_size,
             batch_size,
@@ -515,12 +539,21 @@ unsafe fn copy_array_values_out(
                 })?;
             if array.null_count() == 0 {
                 for (idx, value) in array.values().iter().enumerate() {
-                    write_i64(out_value_buf, idx, value.to_bits() as i64);
+                    // Emit Lucene's order-preserving sortable form so the copied longs sort in
+                    // ascending numeric order (Java owns the transform only for borrowed buffers).
+                    // Sign-extends the sortable i32 into the 8-byte slot so a JAVA_LONG read on the
+                    // Java side yields the correct sortable value.
+                    let b = value.to_bits() as i32;
+                    let s = b ^ ((b >> 31) & 0x7fff_ffff);
+                    write_i64(out_value_buf, idx, s as i64);
                 }
             } else {
                 for idx in 0..rows {
+                    // Nulls write 0, which is unchanged by the transform because 0 is the identity
+                    // for non-negative values.
                     let value = if array.is_valid(idx) {
-                        array.value(idx).to_bits() as i64
+                        let b = array.value(idx).to_bits() as i32;
+                        (b ^ ((b >> 31) & 0x7fff_ffff)) as i64
                     } else {
                         0
                     };
@@ -537,12 +570,18 @@ unsafe fn copy_array_values_out(
                 })?;
             if array.null_count() == 0 {
                 for (idx, value) in array.values().iter().enumerate() {
-                    write_i64(out_value_buf, idx, value.to_bits() as i64);
+                    // Emit Lucene's order-preserving sortable form so the copied longs sort in
+                    // ascending numeric order (Java owns the transform only for borrowed buffers).
+                    let b = value.to_bits() as i64;
+                    write_i64(out_value_buf, idx, b ^ ((b >> 63) & 0x7fff_ffff_ffff_ffff));
                 }
             } else {
                 for idx in 0..rows {
+                    // Nulls write 0, which is unchanged by the transform because 0 is the identity
+                    // for non-negative values.
                     let value = if array.is_valid(idx) {
-                        array.value(idx).to_bits() as i64
+                        let b = array.value(idx).to_bits() as i64;
+                        b ^ ((b >> 63) & 0x7fff_ffff_ffff_ffff)
                     } else {
                         0
                     };
@@ -903,13 +942,15 @@ unsafe fn write_out(ptr: *mut i64, value: i64) {
 
 /// Java-side interpretation of a borrowed values buffer. Mirrors the
 /// `KIND_*` constants in `PageCache.java`; keep in sync.
-const BORROW_KIND_LONG: i64 = 1; // i64 / u64 / f64 raw bits, 8 bytes per row
+const BORROW_KIND_LONG: i64 = 1; // i64 / u64 raw bits, 8 bytes per row
 const BORROW_KIND_INT: i64 = 2; // i32 / date32, sign-extended, 4 bytes per row
-const BORROW_KIND_UINT_BITS: i64 = 3; // u32 / f32 raw bits, zero-extended, 4 bytes per row
+const BORROW_KIND_UINT_BITS: i64 = 3; // u32 raw bits, zero-extended, 4 bytes per row
 const BORROW_KIND_SHORT: i64 = 4; // i16, sign-extended, 2 bytes per row
 const BORROW_KIND_USHORT: i64 = 5; // u16, zero-extended, 2 bytes per row
 const BORROW_KIND_BYTE: i64 = 6; // i8, sign-extended, 1 byte per row
 const BORROW_KIND_UBYTE: i64 = 7; // u8, zero-extended, 1 byte per row
+const BORROW_KIND_DOUBLE: i64 = 8; // f64 raw bits; Java re-encodes to a Lucene sortable long, 8 bytes per row
+const BORROW_KIND_FLOAT: i64 = 9; // f32 raw bits; Java re-encodes to a sign-extended sortable int, 4 bytes per row
 
 struct BorrowedBuffers {
     values_addr: usize,
@@ -931,11 +972,13 @@ struct BorrowedBuffers {
 fn borrowable_buffers(array: &dyn Array, _physical: PhysicalType) -> Option<BorrowedBuffers> {
     use arrow::datatypes::DataType as DT;
     let (kind, width) = match array.data_type() {
-        DT::Int64 | DT::UInt64 | DT::Float64 | DT::Date64 | DT::Timestamp(_, _) => {
+        DT::Int64 | DT::UInt64 | DT::Date64 | DT::Timestamp(_, _) => {
             (BORROW_KIND_LONG, 8usize)
         }
+        DT::Float64 => (BORROW_KIND_DOUBLE, 8),
         DT::Int32 | DT::Date32 | DT::Time32(_) => (BORROW_KIND_INT, 4),
-        DT::UInt32 | DT::Float32 => (BORROW_KIND_UINT_BITS, 4),
+        DT::UInt32 => (BORROW_KIND_UINT_BITS, 4),
+        DT::Float32 => (BORROW_KIND_FLOAT, 4),
         DT::Int16 => (BORROW_KIND_SHORT, 2),
         DT::UInt16 => (BORROW_KIND_USHORT, 2),
         DT::Int8 => (BORROW_KIND_BYTE, 1),
@@ -1070,6 +1113,24 @@ pub unsafe extern "C" fn parquet_df_is_repeated(handle: i64) -> i64 {
         .ok_or_else(|| format!("parquet_df_is_repeated: unknown handle {handle}"))?;
     let repeated = cursor.lock().repeated;
     Ok(if repeated { 1 } else { 0 })
+}
+
+/// Reports whether the file recorded that its multi-valued values were sorted into read-path order
+/// at ingest (`opensearch.values_sorted` = "true"): `1` sorted, `0` unmarked/legacy.
+///
+/// Read from the file's own key-value metadata when the cursor was opened, so it describes what is
+/// actually on disk. Files written before ingest-side sorting (and merge output) carry no marker
+/// and report `0`, so the read path still sorts them — a missed check would make min/max silently
+/// wrong rather than fail loudly.
+#[ffm_safe]
+#[no_mangle]
+pub unsafe extern "C" fn parquet_df_values_sorted(handle: i64) -> i64 {
+    let cursor = CURSORS
+        .get(&handle)
+        .map(|entry| Arc::clone(entry.value()))
+        .ok_or_else(|| format!("parquet_df_values_sorted: unknown handle {handle}"))?;
+    let sorted = cursor.lock().values_sorted;
+    Ok(if sorted { 1 } else { 0 })
 }
 
 #[ffm_safe]
@@ -1503,10 +1564,12 @@ mod tests {
 
     fn parquet_repeated_numeric_fixture() -> Bytes {
         let values = ListArray::from_iter_primitive::<Int64Type, _, _>([
-            Some(vec![Some(3), Some(1)]),
+            // Pre-sorted per document: ingest now sorts each list ascending (ParquetField#writeList)
+            // before it is written, so a representative fixture stores ascending values.
+            Some(vec![Some(1), Some(3)]),
             None,
             Some(vec![]),
-            Some(vec![Some(8), Some(5), Some(8)]),
+            Some(vec![Some(5), Some(8), Some(8)]),
         ]);
         let schema = Arc::new(Schema::new(vec![Field::new(
             "value",
@@ -1522,6 +1585,33 @@ mod tests {
         let mut writer =
             ArrowWriter::try_new(Cursor::new(Vec::new()), Arc::clone(&schema), Some(props))
                 .unwrap();
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(values) as ArrayRef]).unwrap();
+        writer.write(&batch).unwrap();
+        Bytes::from(writer.into_inner().unwrap().into_inner())
+    }
+
+    /// A repeated-int64 fixture that stamps the values-sorted marker in the file's key-value
+    /// metadata, mirroring what `parquet-data-format`'s writer does on the ingest path.
+    fn parquet_marked_sorted_fixture() -> Bytes {
+        let values = ListArray::from_iter_primitive::<Int64Type, _, _>([
+            Some(vec![Some(1), Some(3)]),
+            Some(vec![Some(5), Some(8), Some(8)]),
+        ]);
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            values.data_type().clone(),
+            true,
+        )]));
+        let props = WriterProperties::builder()
+            .set_dictionary_enabled(false)
+            .set_statistics_enabled(EnabledStatistics::Page)
+            .set_key_value_metadata(Some(vec![parquet::file::metadata::KeyValue::new(
+                VALUES_SORTED_KEY.to_string(),
+                Some("true".to_string()),
+            )]))
+            .build();
+        let mut writer =
+            ArrowWriter::try_new(Cursor::new(Vec::new()), Arc::clone(&schema), Some(props)).unwrap();
         let batch = RecordBatch::try_new(schema, vec![Arc::new(values) as ArrayRef]).unwrap();
         writer.write(&batch).unwrap();
         Bytes::from(writer.into_inner().unwrap().into_inner())
@@ -1619,6 +1709,19 @@ mod tests {
         (values, presence)
     }
 
+    /// Lucene's order-preserving "sortable" transform for f64, matching the copy path. It is an
+    /// involution, so the same function decodes: `dec == enc` on the raw bits.
+    fn enc_f64(v: f64) -> i64 {
+        let b = v.to_bits() as i64;
+        b ^ ((b >> 63) & 0x7fff_ffff_ffff_ffff)
+    }
+
+    /// Sortable transform for f32, sign-extended into the 8-byte slot as the Java side reads it back.
+    fn enc_f32(v: f32) -> i64 {
+        let b = v.to_bits() as i32;
+        (b ^ ((b >> 31) & 0x7fff_ffff)) as i64
+    }
+
     #[test]
     fn direct_output_matches_java_numeric_layout() {
         let int32 = Int32Array::from(vec![Some(-7), None, Some(42)]);
@@ -1637,7 +1740,7 @@ mod tests {
         assert_eq!(
             copied_output(&float32, PhysicalType::FLOAT),
             (
-                vec![1.5f32.to_bits() as i64, 0, (-2.25f32).to_bits() as i64],
+                vec![enc_f32(1.5), 0, enc_f32(-2.25)],
                 vec![0b101]
             )
         );
@@ -1646,7 +1749,7 @@ mod tests {
         assert_eq!(
             copied_output(&float64, PhysicalType::DOUBLE),
             (
-                vec![3.5f64.to_bits() as i64, 0, (-9.25f64).to_bits() as i64],
+                vec![enc_f64(3.5), 0, enc_f64(-9.25)],
                 vec![0b101]
             )
         );
@@ -1658,9 +1761,90 @@ mod tests {
         );
     }
 
+    /// The scalar copy path and the repeated/multi-valued path both go through
+    /// `copy_array_values_out`, so verifying it here covers both routes. Negative floats/doubles
+    /// must be emitted in Lucene's sortable form: the transform is an involution (decoding with the
+    /// same formula recovers the original bits) AND it is order-preserving (ascending numeric order
+    /// maps to ascending i64 order). Nulls write 0, the identity for non-negative values.
     #[test]
-    fn direct_output_handles_sliced_validity_bitmaps() {
-        let base = Int64Array::from(vec![Some(99), Some(7), None, Some(-2)]);
+    fn copy_paths_emit_sortable_form_for_negative_floats_and_doubles() {
+        // Ordered ascending numerically (NaN handled separately). Covers negatives, mixed sign,
+        // +/-0.0 and +/-inf.
+        let ordered_f64 = [
+            f64::NEG_INFINITY,
+            -3.0,
+            -1.5,
+            -0.5,
+            -0.0,
+            0.0,
+            0.5,
+            1.5,
+            3.0,
+            f64::INFINITY,
+        ];
+        let f64_in: Vec<Option<f64>> = ordered_f64.iter().map(|v| Some(*v)).collect();
+        let f64_array = Float64Array::from(f64_in);
+        let (f64_out, _) = copied_output(&f64_array, PhysicalType::DOUBLE);
+        for (i, v) in ordered_f64.iter().enumerate() {
+            assert_eq!(f64_out[i], enc_f64(*v), "f64 sortable encode for {v}");
+            // Involution: decoding with the same transform recovers the original bits.
+            let decoded = f64_out[i] ^ ((f64_out[i] >> 63) & 0x7fff_ffff_ffff_ffff);
+            assert_eq!(decoded, v.to_bits() as i64, "f64 round-trip for {v}");
+            if i > 0 {
+                assert!(f64_out[i - 1] < f64_out[i], "f64 order at {v}");
+            }
+        }
+
+        let ordered_f32 = [
+            f32::NEG_INFINITY,
+            -3.0,
+            -1.5,
+            -0.5,
+            -0.0,
+            0.0,
+            0.5,
+            1.5,
+            3.0,
+            f32::INFINITY,
+        ];
+        let f32_in: Vec<Option<f32>> = ordered_f32.iter().map(|v| Some(*v)).collect();
+        let f32_array = Float32Array::from(f32_in);
+        let (f32_out, _) = copied_output(&f32_array, PhysicalType::FLOAT);
+        for (i, v) in ordered_f32.iter().enumerate() {
+            assert_eq!(f32_out[i], enc_f32(*v), "f32 sortable encode for {v}");
+            // Low 32 bits hold the sortable int; the same transform recovers the original f32 bits.
+            let s = f32_out[i] as i32;
+            let decoded = s ^ ((s >> 31) & 0x7fff_ffff);
+            assert_eq!(decoded, v.to_bits() as i32, "f32 round-trip for {v}");
+            if i > 0 {
+                assert!(f32_out[i - 1] < f32_out[i], "f32 order at {v}");
+            }
+        }
+
+        // NaN: round-trips through the involution but is excluded from the order check.
+        let nan64 = Float64Array::from(vec![Some(f64::NAN)]);
+        let (nan64_out, _) = copied_output(&nan64, PhysicalType::DOUBLE);
+        assert_eq!(nan64_out[0] ^ ((nan64_out[0] >> 63) & 0x7fff_ffff_ffff_ffff), f64::NAN.to_bits() as i64);
+        let nan32 = Float32Array::from(vec![Some(f32::NAN)]);
+        let (nan32_out, _) = copied_output(&nan32, PhysicalType::FLOAT);
+        let s = nan32_out[0] as i32;
+        assert_eq!(s ^ ((s >> 31) & 0x7fff_ffff), f32::NAN.to_bits() as i32);
+
+        // Null branch: negatives around a null still encode sortable; the null writes 0.
+        let with_null = Float64Array::from(vec![Some(-1.5), None, Some(-0.0)]);
+        assert_eq!(
+            copied_output(&with_null, PhysicalType::DOUBLE),
+            (vec![enc_f64(-1.5), 0, enc_f64(-0.0)], vec![0b101])
+        );
+        let with_null_f32 = Float32Array::from(vec![Some(-1.5), None, Some(-0.0)]);
+        assert_eq!(
+            copied_output(&with_null_f32, PhysicalType::FLOAT),
+            (vec![enc_f32(-1.5), 0, enc_f32(-0.0)], vec![0b101])
+        );
+    }
+
+    #[test]
+    fn direct_output_handles_sliced_validity_bitmaps() {    let base = Int64Array::from(vec![Some(99), Some(7), None, Some(-2)]);
         let sliced = base.slice(1, 3);
         assert_eq!(
             copied_output(&sliced, PhysicalType::INT64),
@@ -1717,6 +1901,9 @@ mod tests {
     fn retained_repeated_numeric_reader_uses_list_offsets() {
         let (mut cursor, _runtime) = open_parquet_fixture(parquet_repeated_numeric_fixture(), 4);
         assert!(cursor.repeated);
+        // The fixture is written without the values-sorted marker, so the cursor reports unsorted;
+        // the Java reader would sort it. (The stored data happens to be ascending — see fixture.)
+        assert!(!cursor.values_sorted);
         let batch = cursor.next_batch(0).unwrap();
         let array = batch.column(0).as_ref();
         assert_eq!(repeated_value_count(array).unwrap(), 5);
@@ -1727,13 +1914,31 @@ mod tests {
                 .downcast_ref::<Int64Array>()
                 .unwrap()
                 .values(),
-            &[3, 1, 8, 5, 8]
+            &[1, 3, 5, 8, 8]
         );
         let mut row_offsets = vec![-1; batch.num_rows() + 1];
         unsafe {
             write_repeated_offsets(array, row_offsets.as_mut_ptr()).unwrap();
         }
         assert_eq!(row_offsets, vec![0, 2, 2, 2, 5]);
+    }
+
+    #[test]
+    fn values_sorted_marker_read_from_file_metadata() {
+        // Marked file (writer stamped opensearch.values_sorted=true) => cursor reports sorted, so
+        // the Java reader will skip its per-visit sort.
+        let (marked, _r1) = open_parquet_fixture(parquet_marked_sorted_fixture(), 2);
+        assert!(marked.values_sorted, "marked file must report values_sorted");
+        assert_eq!(marked.values_sorted as i64, 1);
+
+        // Unmarked file (no marker in KV metadata, e.g. a legacy or merged segment) => cursor
+        // reports unsorted, so the reader still sorts on read. This is the backward-compatibility
+        // guarantee: a missing marker must never be read as "already sorted".
+        let (unmarked, _r2) = open_parquet_fixture(parquet_repeated_numeric_fixture(), 4);
+        assert!(
+            !unmarked.values_sorted,
+            "unmarked (legacy) file must report NOT values_sorted so the reader still sorts"
+        );
     }
 
     #[test]

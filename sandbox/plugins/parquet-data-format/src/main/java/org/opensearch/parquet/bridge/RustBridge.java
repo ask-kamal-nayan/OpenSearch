@@ -66,6 +66,7 @@ public class RustBridge {
     private static final MethodHandle DF_OPEN_ITER_COUNT;
     private static final MethodHandle DF_ROW_COUNT;
     private static final MethodHandle DF_IS_REPEATED;
+    private static final MethodHandle DF_VALUES_SORTED;
     private static final MethodHandle DF_PAGE_COUNT;
     private static final MethodHandle DF_PAGE_INDEX;
     private static final MethodHandle DF_DIAGNOSTICS_RESET;
@@ -349,6 +350,10 @@ public class RustBridge {
         );
         DF_IS_REPEATED = linker.downcallHandle(
             lib.find("parquet_df_is_repeated").orElseThrow(),
+            FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG)
+        );
+        DF_VALUES_SORTED = linker.downcallHandle(
+            lib.find("parquet_df_values_sorted").orElseThrow(),
             FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG)
         );
         DF_PAGE_COUNT = linker.downcallHandle(
@@ -946,6 +951,16 @@ public class RustBridge {
      */
     static long dfIsRepeated(long handle) throws IOException {
         return invokeChecked(DF_IS_REPEATED, handle);
+    }
+
+    /**
+     * Whether the cursor's file recorded the values-sorted marker ({@code opensearch.values_sorted}):
+     * {@code 1} sorted at ingest, {@code 0} unmarked (legacy/merged). Read from the file's key-value
+     * metadata, so it reflects what is on disk; an absent marker reports {@code 0} and the reader
+     * sorts on read.
+     */
+    static long dfValuesSorted(long handle) throws IOException {
+        return invokeChecked(DF_VALUES_SORTED, handle);
     }
 
     /** Number of OffsetIndex pages for the cursor's projected column. */

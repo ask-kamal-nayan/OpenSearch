@@ -31,11 +31,11 @@ import java.lang.foreign.ValueLayout;
  */
 public final class PageCache {
 
-    /** {@link #values} holds one {@code long} of raw bits per row (copy mode and INT64/f64 borrows). */
+    /** {@link #values} holds one {@code long} of raw bits per row (copy mode and INT64 borrows). */
     public static final int KIND_LONG = 1;
     /** {@link #values} holds one sign-extending {@code int} per row (borrowed Int32/Date32/Time32). */
     public static final int KIND_INT = 2;
-    /** {@link #values} holds one zero-extending {@code int} per row (borrowed UInt32/Float32 bits). */
+    /** {@link #values} holds one zero-extending {@code int} per row (borrowed UInt32). */
     public static final int KIND_UINT_BITS = 3;
     /** {@link #values} holds one sign-extending {@code short} per row (borrowed Int16). */
     public static final int KIND_SHORT = 4;
@@ -45,6 +45,10 @@ public final class PageCache {
     public static final int KIND_BYTE = 6;
     /** {@link #values} holds one zero-extending {@code byte} per row (borrowed UInt8). */
     public static final int KIND_UBYTE = 7;
+    /** {@link #values} holds one {@code long} of raw f64 bits per row; re-encoded to a Lucene sortable long. */
+    public static final int KIND_DOUBLE = 8;
+    /** {@link #values} holds one {@code int} of raw f32 bits per row; re-encoded to a sign-extended sortable int. */
+    public static final int KIND_FLOAT = 9;
 
     /** Inclusive global index of the first row in the cached page. */
     public long firstRow;
@@ -99,7 +103,14 @@ public final class PageCache {
         return (word & (1L << (idx & 63))) != 0L;
     }
 
-    /** Returns the raw {@code long} bits for a primitive value at the given global row. */
+    /**
+     * Returns the value at the given global row as a Lucene numeric doc-values {@code long}.
+     * Integral kinds return the raw {@code long} bits, sign- or zero-extending the stored width.
+     * The float/double kinds re-encode the raw IEEE-754 bits into Lucene's order-preserving
+     * "sortable" form ({@code doubleToSortableLong} / {@code floatToSortableInt}, the latter
+     * sign-extended) - the encoding OpenSearch's float/double fielddata reverses with
+     * {@code sortableLongToDouble} / {@code sortableIntToFloat}.
+     */
     public long valueAt(long row) {
         long idx = row - firstRow;
         return switch (valueKind) {
@@ -109,7 +120,16 @@ public final class PageCache {
             case KIND_SHORT -> values.getAtIndex(ValueLayout.JAVA_SHORT, idx);
             case KIND_USHORT -> Short.toUnsignedLong(values.getAtIndex(ValueLayout.JAVA_SHORT, idx));
             case KIND_BYTE -> values.get(ValueLayout.JAVA_BYTE, idx);
-            default -> Byte.toUnsignedLong(values.get(ValueLayout.JAVA_BYTE, idx));
+            case KIND_UBYTE -> Byte.toUnsignedLong(values.get(ValueLayout.JAVA_BYTE, idx));
+            case KIND_DOUBLE -> {
+                long bits = values.getAtIndex(ValueLayout.JAVA_LONG, idx);
+                yield bits ^ ((bits >> 63) & 0x7fffffffffffffffL);
+            }
+            case KIND_FLOAT -> {
+                int bits = values.getAtIndex(ValueLayout.JAVA_INT, idx);
+                yield (long) (bits ^ ((bits >> 31) & 0x7fffffff));
+            }
+            default -> throw new IllegalStateException("unknown value kind " + valueKind);
         };
     }
 

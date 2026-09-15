@@ -111,6 +111,11 @@ impl MergeContext {
             WriterPropertiesBuilder::build_with_generation(
                 &config,
                 Some(output_writer_generation),
+                // Merge does not re-sort per-document element lists, and an input may be a legacy
+                // unsorted segment, so we conservatively leave the values-sorted marker unset. The
+                // read path then sorts merged output — correct, just not optimised. (Propagating the
+                // marker when every input carries it is a possible follow-up.)
+                false,
                 &output_schema,
             )
             .map_err(|e| {

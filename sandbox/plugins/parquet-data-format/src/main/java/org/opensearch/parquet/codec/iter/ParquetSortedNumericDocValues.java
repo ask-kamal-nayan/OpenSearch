@@ -22,11 +22,18 @@ import java.util.Arrays;
  * batch, loading the next batch when necessary, then sorts them ascending to satisfy Lucene's
  * contract. The per-doc values are buffered in a reused array and walked by
  * {@link #nextValue()}.
+ *
+ * <p>When {@code valuesSorted} is set the file recorded that its values were already sorted into
+ * ascending order at ingest, so the per-visit sort is skipped. It defaults to sorting (an absent
+ * marker, i.e. a legacy or merged file, reads as {@code false}) so backward compatibility is never
+ * silently broken.
  */
 public final class ParquetSortedNumericDocValues extends SortedNumericDocValues {
 
     private final NumericPageReader reader;
     private final int maxDoc;
+    /** When true the on-disk values are already ascending (per the file's marker); skip the sort. */
+    private final boolean valuesSorted;
 
     private int doc = -1;
     /** Reused per-doc value buffer; the reader fills it in place, so steady state allocates nothing. */
@@ -34,9 +41,10 @@ public final class ParquetSortedNumericDocValues extends SortedNumericDocValues 
     private int count;
     private int cursor;
 
-    public ParquetSortedNumericDocValues(NumericPageReader reader, int maxDoc) {
+    public ParquetSortedNumericDocValues(NumericPageReader reader, int maxDoc, boolean valuesSorted) {
         this.reader = reader;
         this.maxDoc = maxDoc;
+        this.valuesSorted = valuesSorted;
     }
 
     @Override
@@ -54,8 +62,13 @@ public final class ParquetSortedNumericDocValues extends SortedNumericDocValues 
         if (count == 0) {
             return false; // empty list = missing.
         }
-        // Lucene's SortedNumeric contract requires ascending order.
-        Arrays.sort(values.longs, 0, count);
+        // Lucene's SortedNumeric contract requires ascending order. Files written with the
+        // values-sorted marker were already sorted into ascending order at ingest (see
+        // ParquetField#writeList), so we skip the redundant per-visit sort for them; unmarked
+        // (legacy/merged) files still get sorted here.
+        if (valuesSorted == false) {
+            Arrays.sort(values.longs, 0, count);
+        }
         return true;
     }
 

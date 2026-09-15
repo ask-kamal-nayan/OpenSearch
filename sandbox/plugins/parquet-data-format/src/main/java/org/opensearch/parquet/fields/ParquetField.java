@@ -17,6 +17,8 @@ import org.opensearch.index.engine.dataformat.FieldTypeCapabilities;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.parquet.vsr.ManagedVSR;
 
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Set;
 
@@ -63,6 +65,29 @@ public abstract class ParquetField {
         throw new UnsupportedOperationException(
             "Field type [" + getClass().getSimpleName() + "] does not support multi-valued (list) storage"
         );
+    }
+
+    /**
+     * Orders a document's multi-valued list elements the same way the read path compares them, so
+     * {@link #writeList} can pre-sort each document's values once at ingest and the reader can skip
+     * its per-visit {@code Arrays.sort} (see {@code ParquetSortedNumericDocValues} /
+     * {@code ParquetSortedSetDocValues}) for files carrying the values-sorted marker.
+     * <p>
+     * The default is natural ordering of the boxed values. That is correct for the signed integer
+     * types and — because {@link Double#compare}/{@link Float#compare} impose the same total order
+     * as Lucene's sortable-long encoding ({@code -0.0 < +0.0}, {@code NaN} greatest) — for float and
+     * double as well. Types whose stored/read order differs from the boxed value's natural order
+     * override this: keyword compares UTF-8 bytes (BytesRef order), unsigned_long compares the
+     * signed 64-bit stored representation.
+     *
+     * @return comparator over non-null boxed element values
+     */
+    protected Comparator<Object> listElementComparator() {
+        return (a, b) -> {
+            @SuppressWarnings("unchecked")
+            Comparable<Object> ca = (Comparable<Object>) a;
+            return ca.compareTo(b);
+        };
     }
 
     /**
@@ -135,6 +160,25 @@ public abstract class ParquetField {
             return;
         }
         List<?> values = parseValue instanceof List<?> list ? list : List.of(parseValue);
+        // Sort each document's values ONCE here, at ingest, into the exact order the read path
+        // compares them in (see {@link #listElementComparator}). This mirrors Lucene, which sorts
+        // in SortedNumericDocValuesWriter.finishCurrentDoc at index time; our reader can then skip
+        // its per-visit Arrays.sort for files carrying the values-sorted marker
+        // (ParquetSortedNumericDocValues / ParquetSortedSetDocValues).
+        //
+        // Null-element policy: a natural-ordering sort of a list containing nulls throws NPE, so we
+        // order non-null values by {@link #listElementComparator} and push any nulls to the END via
+        // Comparator.nullsLast. Position is otherwise unobservable for nulls because the READ path
+        // already REJECTS null list elements outright (the native layer errors with "null list
+        // elements are not valid DocValues"); a document with a null inside an array is therefore a
+        // degenerate case the reader will not accept regardless of where the null sits. We keep the
+        // existing dataVector.setNull(...) bookkeeping so list length and null count are preserved.
+        // This ingest/read inconsistency (writer tolerates nulls, reader forbids them) is pre-existing.
+        if (values.size() > 1) {
+            List<Object> ordered = new ArrayList<>(values);
+            ordered.sort(Comparator.nullsLast(listElementComparator()));
+            values = ordered;
+        }
         int start = listVector.startNewValue(row);
         FieldVector dataVector = listVector.getDataVector();
         for (int i = 0; i < values.size(); i++) {

@@ -618,7 +618,9 @@ public class VSRManagerTests extends ParquetBaseTests {
             manager.addDocument(doc2);
 
             ListVector listVector = (ListVector) manager.getActiveManagedVSR().getVector("tags");
-            assertEquals(List.of("b", "a", "b"), listElements(listVector, 0));
+            // Values are sorted into read-path (UTF-8 byte) order at ingest, and duplicates survive
+            // (SORTED_SET de-dup happens on read, not here): ["b","a","b"] -> ["a","b","b"].
+            assertEquals(List.of("a", "b", "b"), listElements(listVector, 0));
             assertTrue("absent field must read back as a null list", listVector.isNull(1));
             assertEquals(List.of("solo"), listElements(listVector, 2));
 
@@ -668,7 +670,9 @@ public class VSRManagerTests extends ParquetBaseTests {
             manager.addDocument(doc2);
 
             ListVector listVector = (ListVector) manager.getActiveManagedVSR().getVector("scores");
-            assertEquals(List.of(20, 10, 20), intListElements(listVector, 0));
+            // Sorted ascending at ingest; duplicates survive (numeric SORTED_NUMERIC keeps them):
+            // [20,10,20] -> [10,20,20].
+            assertEquals(List.of(10, 20, 20), intListElements(listVector, 0));
             assertTrue("absent field must read back as a null list", listVector.isNull(1));
             assertEquals(List.of(30), intListElements(listVector, 2));
 

@@ -223,6 +223,18 @@ public final class DataFusionColumnReader implements Closeable, NumericPageReade
         return RustBridge.dfIsRepeated(handle()) != 0;
     }
 
+    /**
+     * Whether the file backing this reader recorded that its multi-valued values were sorted into
+     * read-path order at ingest ({@code opensearch.values_sorted} marker in the Parquet key-value
+     * metadata): {@code true} sorted, {@code false} unmarked (legacy/merged).
+     *
+     * <p>Metadata only — like {@link #isPhysicallyRepeated} it never advances the native cursor, so
+     * it is safe to call on the shared reader rather than a dedicated one.
+     */
+    public boolean isValuesSorted() throws IOException {
+        return RustBridge.dfValuesSorted(handle()) != 0;
+    }
+
     @Override
     public PageCache cache() {
         return cache;
@@ -329,8 +341,8 @@ public final class DataFusionColumnReader implements Closeable, NumericPageReade
             long validityAddr = validityAddrOut.get(ValueLayout.JAVA_LONG, 0);
             int bitOffset = (int) validityBitOffsetOut.get(ValueLayout.JAVA_LONG, 0);
             int width = switch (kind) {
-                case PageCache.KIND_LONG -> Long.BYTES;
-                case PageCache.KIND_INT, PageCache.KIND_UINT_BITS -> Integer.BYTES;
+                case PageCache.KIND_LONG, PageCache.KIND_DOUBLE -> Long.BYTES;
+                case PageCache.KIND_INT, PageCache.KIND_UINT_BITS, PageCache.KIND_FLOAT -> Integer.BYTES;
                 case PageCache.KIND_SHORT, PageCache.KIND_USHORT -> Short.BYTES;
                 default -> Byte.BYTES;
             };
@@ -479,6 +491,12 @@ public final class DataFusionColumnReader implements Closeable, NumericPageReade
         dst.longs = ArrayUtil.grow(dst.longs, count);
         dst.offset = 0;
         dst.length = count;
+        // FLOAT/DOUBLE columns arrive already in Lucene's order-preserving "sortable" long form:
+        // the Rust side emits the sortable transform on the copy paths (both scalar and this
+        // repeated path), so no per-element Java transform is needed here and a single bulk
+        // MemorySegment.copy serves all types. The transform still necessarily happens before
+        // ParquetSortedNumericDocValues sorts these longs ascending, since Rust applies it during
+        // the copy that produces this page.
         MemorySegment.copy(page.values, ValueLayout.JAVA_LONG, (long) start * Long.BYTES, dst.longs, 0, count);
     }
 

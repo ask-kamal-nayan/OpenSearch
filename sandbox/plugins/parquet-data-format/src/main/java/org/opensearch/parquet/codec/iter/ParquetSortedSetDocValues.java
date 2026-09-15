@@ -47,16 +47,19 @@ public final class ParquetSortedSetDocValues extends SortedSetDocValues {
     private final BinaryPageReader reader;
     private final boolean repeated;
     private final int maxDoc;
+    /** When true the on-disk values are already ascending (per the file's marker); skip the sort. */
+    private final boolean valuesSorted;
 
     private int doc = -1;
     private BytesRef[] values = new BytesRef[0];
     private int count;
     private int cursor;
 
-    public ParquetSortedSetDocValues(BinaryPageReader reader, boolean repeated, int maxDoc) {
+    public ParquetSortedSetDocValues(BinaryPageReader reader, boolean repeated, int maxDoc, boolean valuesSorted) {
         this.reader = reader;
         this.repeated = repeated;
         this.maxDoc = maxDoc;
+        this.valuesSorted = valuesSorted;
     }
 
     @Override
@@ -94,7 +97,15 @@ public final class ParquetSortedSetDocValues extends SortedSetDocValues {
         for (int i = 0; i < raw.length; i++) {
             values[i] = new BytesRef(raw[i]);
         }
-        Arrays.sort(values, 0, raw.length);
+        // Files written with the values-sorted marker were already sorted into ascending order at
+        // ingest (see ParquetField#writeList, keyword UTF-8 byte order), so skip the redundant
+        // per-visit sort for them; unmarked (legacy/merged) files still get sorted here.
+        // De-duplication runs unconditionally: SORTED_SET must still collapse equal adjacent values,
+        // and skipping the sort does not skip the dedup — pre-sorted input already has equal values
+        // adjacent, so the same adjacent-comparison pass removes them.
+        if (valuesSorted == false) {
+            Arrays.sort(values, 0, raw.length);
+        }
         int unique = 1;
         for (int i = 1; i < raw.length; i++) {
             if (values[i].bytesEquals(values[unique - 1]) == false) {

@@ -219,11 +219,14 @@ public class DataFusionDocValuesTests extends OpenSearchTestCase {
     }
 
     private static void writeNumbers(ListVector vector) {
+        // Written pre-sorted ascending: NativeParquetWriter stamps the values-sorted marker (the
+        // ingest path sorts in ParquetField#writeList), so the reader trusts on-disk order and skips
+        // its per-visit sort. A representative fixture therefore stores ascending values.
         UnionListWriter writer = vector.getWriter();
         writer.setPosition(0);
         writer.startList();
-        writer.writeBigInt(3);
         writer.writeBigInt(1);
+        writer.writeBigInt(3);
         writer.endList();
         writer.setPosition(1);
         writer.writeNull();
@@ -232,19 +235,22 @@ public class DataFusionDocValuesTests extends OpenSearchTestCase {
         writer.endList();
         writer.setPosition(3);
         writer.startList();
-        writer.writeBigInt(8);
         writer.writeBigInt(5);
+        writer.writeBigInt(8);
         writer.writeBigInt(8);
         writer.endList();
         writer.setValueCount(ROW_COUNT);
     }
 
     private static void writeTags(ListVector vector) {
+        // Written pre-sorted (UTF-8 byte order) and, for doc 3, with the duplicate adjacent: the
+        // file is marked values-sorted so the reader skips the sort but STILL de-duplicates, which
+        // relies on equal values being adjacent (guaranteed by the ingest sort).
         UnionListWriter writer = vector.getWriter();
         writer.setPosition(0);
         writer.startList();
-        writer.writeVarChar("beta");
         writer.writeVarChar("alpha");
+        writer.writeVarChar("beta");
         writer.endList();
         writer.setPosition(1);
         writer.writeNull();
@@ -253,8 +259,8 @@ public class DataFusionDocValuesTests extends OpenSearchTestCase {
         writer.endList();
         writer.setPosition(3);
         writer.startList();
-        writer.writeVarChar("omega");
         writer.writeVarChar("alpha");
+        writer.writeVarChar("omega");
         writer.writeVarChar("omega");
         writer.endList();
         writer.setValueCount(ROW_COUNT);

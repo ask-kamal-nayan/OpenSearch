@@ -157,6 +157,12 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
      * the Parquet file backing it never changes shape once written.
      */
     private final Map<String, Boolean> repeatedColumns = new java.util.concurrent.ConcurrentHashMap<>();
+    /**
+     * Memoised per-field values-sorted marker, read from the Parquet file's key-value metadata.
+     * Immutable for a segment's lifetime, like {@link #repeatedColumns}: a file's contents never
+     * change once written, so the marker is fixed.
+     */
+    private final Map<String, Boolean> sortedColumns = new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.List<java.io.Closeable> dedicatedReaders = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
 
     /** Optional per-query accumulator; propagated to each column reader so its stats roll up at close. */
@@ -223,7 +229,7 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     public SortedNumericDocValues getSortedNumeric(FieldInfo field) throws IOException {
         ensureOpen();
         validate(field, DocValuesType.SORTED_NUMERIC);
-        return new ParquetSortedNumericDocValues(dedicatedReaderFor(field, true), maxDoc);
+        return new ParquetSortedNumericDocValues(dedicatedReaderFor(field, true), maxDoc, isValuesSorted(field));
     }
 
     @Override
@@ -247,7 +253,7 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
         // Convention (mirrors the ordinal-table era and the leaf reader's routing): SORTED_SET
         // reaches this producer only for genuinely repeated columns; single-valued keywords are
         // served through getSorted and wrapped with DocValues.singleton by the leaf reader.
-        return new ParquetSortedSetDocValues(dedicatedReaderFor(field, true), true, maxDoc);
+        return new ParquetSortedSetDocValues(dedicatedReaderFor(field, true), true, maxDoc, isValuesSorted(field));
     }
 
     /**
@@ -329,6 +335,7 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
         dedicatedReaders.clear();
         dataFusionColumnReaders.clear();
         repeatedColumns.clear();
+        sortedColumns.clear();
         bufferPool.close();
         if (first != null) {
             throw first;
@@ -401,6 +408,29 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
         boolean repeated = dataFusionReaderFor(field, false).isPhysicallyRepeated();
         repeatedColumns.put(field.getName(), repeated);
         return repeated;
+    }
+
+    /**
+     * Whether {@code field}'s Parquet file recorded that its multi-valued values were sorted into
+     * read-path order at ingest ({@code opensearch.values_sorted} marker).
+     *
+     * <p>Read from the file's own key-value metadata, so it reflects what is actually on disk. An
+     * absent marker — a legacy file written before ingest-side sorting, or a merged file that
+     * conservatively left it unset — reads as {@code false}, so the SortedNumeric/SortedSet
+     * iterators still sort on read. This default-to-sort is the crux of backward compatibility: a
+     * missed marker check would make min/max silently wrong rather than fail loudly.
+     *
+     * <p>Uses the shared metadata reader and memoises, since a segment's contents are fixed once
+     * written. Mirrors {@link #isRepeated}.
+     */
+    boolean isValuesSorted(FieldInfo field) throws IOException {
+        Boolean cached = sortedColumns.get(field.getName());
+        if (cached != null) {
+            return cached;
+        }
+        boolean sorted = dataFusionReaderFor(field, false).isValuesSorted();
+        sortedColumns.put(field.getName(), sorted);
+        return sorted;
     }
 
     long nonNullRowCount(FieldInfo field) throws IOException {

@@ -15,6 +15,8 @@ import org.apache.arrow.vector.types.pojo.FieldType;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.parquet.vsr.ManagedVSR;
 
+import java.util.Comparator;
+
 /**
  * Parquet field for 64-bit unsigned long values using {@link UInt8Vector}.
  */
@@ -31,6 +33,18 @@ public class UnsignedLongParquetField extends NumericParquetField {
     @Override
     protected void addToVector(FieldVector vector, int index, Object parseValue) {
         ((UInt8Vector) vector).setSafe(index, ((Number) parseValue).longValue());
+    }
+
+    /**
+     * Stored as the low 64 bits via {@link Number#longValue()}; the read path reads those raw bits
+     * as a signed {@code i64} and sorts them signed (see {@code ParquetSortedNumericDocValues}).
+     * Natural ordering of the boxed value would use unsigned magnitude and mis-order values above
+     * {@link Long#MAX_VALUE}, so we reproduce the reader's signed order over the exact stored
+     * representation.
+     */
+    @Override
+    protected Comparator<Object> listElementComparator() {
+        return Comparator.comparingLong(v -> ((Number) v).longValue());
     }
 
     @Override

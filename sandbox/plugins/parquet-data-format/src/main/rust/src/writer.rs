@@ -497,6 +497,8 @@ impl NativeParquetWriter {
             let props = WriterPropertiesBuilder::build_with_generation(
                 &settings,
                 Some(writer_generation),
+                // Ingest path: the Java layer sorted each document's multi-values before this write.
+                true,
                 &schema,
             )
             .map_err(|e| format!("Invalid encoding/compression config: {}", e))?;
@@ -755,6 +757,8 @@ impl NativeParquetWriter {
             let props = WriterPropertiesBuilder::build_with_generation(
                 &config,
                 Some(writer_generation),
+                // Ingest path: the Java layer sorted each document's multi-values before this write.
+                true,
                 &schema,
             )
             .map_err(|e| format!("Invalid encoding/compression config: {}", e))?;
@@ -932,7 +936,7 @@ impl NativeParquetWriter {
             .map(|r| r.clone())
             .unwrap_or_default();
         let props =
-            WriterPropertiesBuilder::build_with_generation(&config, writer_generation, &schema)
+            WriterPropertiesBuilder::build_with_generation(&config, writer_generation, true, &schema)
                 .map_err(|e| format!("Invalid encoding/compression config: {}", e))?;
         let file = File::create(output_filename)?;
         let (crc_file, crc_handle) = CrcWriter::new(file);
