@@ -22,4 +22,13 @@ public abstract class NumericParquetField extends ParquetField {
     public Set<FieldTypeCapabilities.Capability> supportedCapabilities() {
         return Set.of(FieldTypeCapabilities.Capability.COLUMNAR_STORAGE, FieldTypeCapabilities.Capability.BLOOM_FILTER);
     }
+
+    /**
+     * Numeric fields can be stored as Parquet LIST columns; each concrete subtype implements
+     * {@link #addToVector} with its own Arrow vector coercion.
+     */
+    @Override
+    public boolean supportsMultiValue() {
+        return true;
+    }
 }

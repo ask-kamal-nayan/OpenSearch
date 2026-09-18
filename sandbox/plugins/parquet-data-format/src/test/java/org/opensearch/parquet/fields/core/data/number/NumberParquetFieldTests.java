@@ -18,6 +18,7 @@ import org.apache.arrow.vector.Float8Vector;
 import org.apache.arrow.vector.IntVector;
 import org.apache.arrow.vector.SmallIntVector;
 import org.apache.arrow.vector.TinyIntVector;
+import org.apache.arrow.vector.complex.ListVector;
 import org.apache.arrow.vector.types.FloatingPointPrecision;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
@@ -221,6 +222,139 @@ public class NumberParquetFieldTests extends OpenSearchTestCase {
         Schema schema = new Schema(List.of(new Field(fieldName, pf.getFieldType(), null)));
         BufferAllocator child = allocator.newChildAllocator(id, 0, Long.MAX_VALUE);
         return new ManagedVSR(id, schema, child);
+    }
+
+    public void testNumericFieldsSupportMultiValue() {
+        assertTrue(new ByteParquetField().supportsMultiValue());
+        assertTrue(new ShortParquetField().supportsMultiValue());
+        assertTrue(new IntegerParquetField().supportsMultiValue());
+        assertTrue(new LongParquetField().supportsMultiValue());
+        assertTrue(new UnsignedLongParquetField().supportsMultiValue());
+        assertTrue(new TokenCountParquetField().supportsMultiValue());
+        assertTrue(new FloatParquetField().supportsMultiValue());
+        assertTrue(new DoubleParquetField().supportsMultiValue());
+        assertTrue(new HalfFloatParquetField().supportsMultiValue());
+    }
+
+    public void testLongFieldAddToVectorWritesList() {
+        LongParquetField field = new LongParquetField();
+        MappedFieldType ft = new NumberFieldMapper.NumberFieldType("val", NumberFieldMapper.NumberType.LONG);
+        ManagedVSR vsr = createListVSR("long-list-test", field, "val");
+        // Document order is preserved on ingest; C3 is ingest enablement only, no sort.
+        field.createField(ft, vsr, List.of(7L, 2L, 5L));
+        vsr.setRowCount(1);
+        assertEquals(List.of(7L, 2L, 5L), ((ListVector) vsr.getVector("val")).getObject(0));
+        cleanupVSR(vsr);
+    }
+
+    public void testIntegerFieldAddToVectorWritesList() {
+        IntegerParquetField field = new IntegerParquetField();
+        MappedFieldType ft = new NumberFieldMapper.NumberFieldType("val", NumberFieldMapper.NumberType.INTEGER);
+        ManagedVSR vsr = createListVSR("int-list-test", field, "val");
+        field.createField(ft, vsr, List.of(3, 1, 2));
+        vsr.setRowCount(1);
+        assertEquals(List.of(3, 1, 2), ((ListVector) vsr.getVector("val")).getObject(0));
+        cleanupVSR(vsr);
+    }
+
+    public void testShortFieldAddToVectorWritesList() {
+        ShortParquetField field = new ShortParquetField();
+        MappedFieldType ft = new NumberFieldMapper.NumberFieldType("val", NumberFieldMapper.NumberType.SHORT);
+        ManagedVSR vsr = createListVSR("short-list-test", field, "val");
+        field.createField(ft, vsr, List.of((short) 9, (short) 4));
+        vsr.setRowCount(1);
+        assertEquals(List.of((short) 9, (short) 4), ((ListVector) vsr.getVector("val")).getObject(0));
+        cleanupVSR(vsr);
+    }
+
+    public void testByteFieldAddToVectorWritesList() {
+        ByteParquetField field = new ByteParquetField();
+        MappedFieldType ft = new NumberFieldMapper.NumberFieldType("val", NumberFieldMapper.NumberType.BYTE);
+        ManagedVSR vsr = createListVSR("byte-list-test", field, "val");
+        field.createField(ft, vsr, List.of((byte) 6, (byte) 1));
+        vsr.setRowCount(1);
+        assertEquals(List.of((byte) 6, (byte) 1), ((ListVector) vsr.getVector("val")).getObject(0));
+        cleanupVSR(vsr);
+    }
+
+    public void testDoubleFieldAddToVectorWritesList() {
+        DoubleParquetField field = new DoubleParquetField();
+        MappedFieldType ft = new NumberFieldMapper.NumberFieldType("val", NumberFieldMapper.NumberType.DOUBLE);
+        ManagedVSR vsr = createListVSR("double-list-test", field, "val");
+        field.createField(ft, vsr, List.of(2.5, 1.25));
+        vsr.setRowCount(1);
+        assertEquals(List.of(2.5, 1.25), ((ListVector) vsr.getVector("val")).getObject(0));
+        cleanupVSR(vsr);
+    }
+
+    public void testFloatFieldAddToVectorWritesList() {
+        FloatParquetField field = new FloatParquetField();
+        MappedFieldType ft = new NumberFieldMapper.NumberFieldType("val", NumberFieldMapper.NumberType.FLOAT);
+        ManagedVSR vsr = createListVSR("float-list-test", field, "val");
+        field.createField(ft, vsr, List.of(3.5f, 1.5f));
+        vsr.setRowCount(1);
+        assertEquals(List.of(3.5f, 1.5f), ((ListVector) vsr.getVector("val")).getObject(0));
+        cleanupVSR(vsr);
+    }
+
+    public void testUnsignedLongFieldAddToVectorWritesList() {
+        UnsignedLongParquetField field = new UnsignedLongParquetField();
+        MappedFieldType ft = new NumberFieldMapper.NumberFieldType("val", NumberFieldMapper.NumberType.UNSIGNED_LONG);
+        ManagedVSR vsr = createListVSR("unsigned-long-list-test", field, "val");
+        field.createField(ft, vsr, List.of(10L, 20L));
+        vsr.setRowCount(1);
+        assertEquals(List.of(10L, 20L), ((ListVector) vsr.getVector("val")).getObject(0));
+        cleanupVSR(vsr);
+    }
+
+    private ManagedVSR createListVSR(String id, ParquetField pf, String fieldName) {
+        Schema schema = new Schema(List.of(pf.toArrowField(fieldName, true)));
+        BufferAllocator child = allocator.newChildAllocator(id, 0, Long.MAX_VALUE);
+        return new ManagedVSR(id, schema, child);
+    }
+
+    public void testLongFieldMultiValueSortAscending() {
+        LongParquetField field = new LongParquetField();
+        MappedFieldType ft = new NumberFieldMapper.NumberFieldType("val", NumberFieldMapper.NumberType.LONG);
+        ManagedVSR vsr = createListVSR("long-sort-test", field, "val");
+        // sortMultiValues=true reorders this document's values ascending before they hit the vector.
+        field.createField(ft, vsr, List.of(7L, 2L, 5L), true);
+        vsr.setRowCount(1);
+        assertEquals(List.of(2L, 5L, 7L), ((ListVector) vsr.getVector("val")).getObject(0));
+        cleanupVSR(vsr);
+    }
+
+    public void testLongFieldMultiValueSortIsSignedNotUnsigned() {
+        // Negative longs (high bit set) must sort BELOW positives — the raw signed-long order the
+        // reader uses (KIND_LONG), not unsigned magnitude. -1L as unsigned would be the largest.
+        LongParquetField field = new LongParquetField();
+        MappedFieldType ft = new NumberFieldMapper.NumberFieldType("val", NumberFieldMapper.NumberType.LONG);
+        ManagedVSR vsr = createListVSR("long-signed-sort-test", field, "val");
+        field.createField(ft, vsr, List.of(1L, -1L, 0L), true);
+        vsr.setRowCount(1);
+        assertEquals(List.of(-1L, 0L, 1L), ((ListVector) vsr.getVector("val")).getObject(0));
+        cleanupVSR(vsr);
+    }
+
+    public void testDoubleFieldMultiValueSortAscending() {
+        DoubleParquetField field = new DoubleParquetField();
+        MappedFieldType ft = new NumberFieldMapper.NumberFieldType("val", NumberFieldMapper.NumberType.DOUBLE);
+        ManagedVSR vsr = createListVSR("double-sort-test", field, "val");
+        field.createField(ft, vsr, List.of(2.5, -1.5, 0.25), true);
+        vsr.setRowCount(1);
+        assertEquals(List.of(-1.5, 0.25, 2.5), ((ListVector) vsr.getVector("val")).getObject(0));
+        cleanupVSR(vsr);
+    }
+
+    public void testLongFieldMultiValueUnsortedWhenDisabled() {
+        // With the sort off (the default createField path), values keep document order.
+        LongParquetField field = new LongParquetField();
+        MappedFieldType ft = new NumberFieldMapper.NumberFieldType("val", NumberFieldMapper.NumberType.LONG);
+        ManagedVSR vsr = createListVSR("long-nosort-test", field, "val");
+        field.createField(ft, vsr, List.of(7L, 2L, 5L), false);
+        vsr.setRowCount(1);
+        assertEquals(List.of(7L, 2L, 5L), ((ListVector) vsr.getVector("val")).getObject(0));
+        cleanupVSR(vsr);
     }
 
     private void cleanupVSR(ManagedVSR vsr) {

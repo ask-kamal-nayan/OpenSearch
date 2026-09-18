@@ -37,6 +37,16 @@ public class MultiValueFieldMapperTests extends MapperServiceTestCase {
         }));
     }
 
+    private DocumentMapper numberMapper(Boolean multiValue) throws IOException {
+        return createDocumentMapper(pluggableSettings(), mapping(b -> {
+            b.startObject("field").field("type", "integer");
+            if (multiValue != null) {
+                b.field("multi_value", multiValue);
+            }
+            b.endObject();
+        }));
+    }
+
     @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)
     public void testSecondValuePromotesKeyword() throws IOException {
         DocumentMapper mapper = keywordMapper();
@@ -140,6 +150,52 @@ public class MultiValueFieldMapperTests extends MapperServiceTestCase {
             () -> merge(mapperService, mapping(b -> b.startObject("field").field("type", "keyword").field("multi_value", true).endObject()))
         );
         assertThat(error.getMessage(), containsString("Cannot update parameter [multi_value] from [false] to [true]"));
+    }
+
+    @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)
+    public void testExplicitMultiValueNumberMapping() throws IOException {
+        DocumentMapper mapper = numberMapper(true);
+        FieldMapper fieldMapper = (FieldMapper) mapper.mappers().getMapper("field");
+        assertTrue(fieldMapper.fieldType().isMultiValued());
+        assertTrue(fieldMapper.fieldType().isMultiValueSupported());
+    }
+
+    @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)
+    public void testOmittedNumberRemainsAutoButSupported() throws IOException {
+        DocumentMapper mapper = numberMapper(null);
+        FieldMapper fieldMapper = (FieldMapper) mapper.mappers().getMapper("field");
+        assertEquals(MappedFieldType.MultiValueState.AUTO, fieldMapper.fieldType().multiValueState());
+        assertTrue(fieldMapper.fieldType().isMultiValueSupported());
+        assertThat(mapper.mappingSource().string(), not(containsString("multi_value")));
+    }
+
+    @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)
+    public void testSecondValuePromotesNumber() throws IOException {
+        DocumentMapper mapper = numberMapper(null);
+        CapturingDocumentInput input = new CapturingDocumentInput();
+        ParsedDocument parsed = mapper.parse(source(b -> b.startArray("field").value(7).value(2).endArray()), input);
+
+        assertEquals(2L, input.getFieldCount("field"));
+        assertNotNull(parsed.dynamicMappingsUpdate());
+        Mapper update = parsed.dynamicMappingsUpdate().root().getMapper("field");
+        assertThat(update, instanceOf(ParametrizedFieldMapper.class));
+        assertTrue(((FieldMapper) update).fieldType().isMultiValued());
+        assertTrue(((FieldMapper) update).fieldType().isMultiValueSupported());
+    }
+
+    @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)
+    public void testExplicitFalseLocksNumber() throws IOException {
+        DocumentMapper mapper = numberMapper(false);
+        FieldMapper fieldMapper = (FieldMapper) mapper.mappers().getMapper("field");
+        assertEquals(MappedFieldType.MultiValueState.SCALAR, fieldMapper.fieldType().multiValueState());
+        assertThat(mapper.mappingSource().string(), containsString("\"multi_value\":false"));
+
+        MapperParsingException error = expectThrows(
+            MapperParsingException.class,
+            () -> mapper.parse(source(b -> b.startArray("field").value(7).value(2).endArray()), new CapturingDocumentInput())
+        );
+        assertNotNull(error.getCause());
+        assertThat(error.getCause().getMessage(), containsString("locked scalar by [multi_value: false]"));
     }
 
     @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)
