@@ -24,7 +24,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <p>Wraps the stateless JNI methods in {@link RustBridge} with a file-scoped lifecycle:
  * <ol>
  *   <li>{@code new NativeParquetWriter(filePath)} — creates the handle (no native call)</li>
- *   <li>{@link #initialize(String, long, ParquetSortConfig, long)} — creates the native writer with the final schema</li>
+ *   <li>{@link #initialize(String, long, ParquetSortConfig, long, boolean)} — creates the native writer with the final schema</li>
  *   <li>{@link #write(long, long)} — sends one or more Arrow batches (repeatable)</li>
  *   <li>{@link #flush()} — finalizes the Parquet file and returns metadata</li>
  * </ol>
@@ -45,7 +45,7 @@ public class NativeParquetWriter {
 
     /**
      * Creates a new NativeParquetWriter handle. Does not create the native writer —
-     * call {@link #initialize(String, long, ParquetSortConfig, long)} before the first write.
+     * call {@link #initialize(String, long, ParquetSortConfig, long, boolean)} before the first write.
      *
      * @param filePath the path to the Parquet file to write
      * @param stats shard-level stats tracker
@@ -72,14 +72,22 @@ public class NativeParquetWriter {
      * @param schemaAddress     the native memory address of the Arrow schema
      * @param sortConfig        the sort configuration for the Parquet file
      * @param writerGeneration  the writer generation to store in file metadata
+     * @param multiValueSortEnabled whether ingest sorts each document's multi-value list ascending;
+     *                              stamped as the {@code opensearch.values_sorted} footer marker
      * @throws IOException if the native writer creation fails
      * @throws IllegalStateException if already initialized
      */
-    public void initialize(String indexName, long schemaAddress, ParquetSortConfig sortConfig, long writerGeneration) throws IOException {
+    public void initialize(
+        String indexName,
+        long schemaAddress,
+        ParquetSortConfig sortConfig,
+        long writerGeneration,
+        boolean multiValueSortEnabled
+    ) throws IOException {
         if (initialized) {
             throw new IllegalStateException("Writer already initialized: " + filePath);
         }
-        RustBridge.createWriter(filePath, indexName, schemaAddress, sortConfig, writerGeneration);
+        RustBridge.createWriter(filePath, indexName, schemaAddress, sortConfig, writerGeneration, multiValueSortEnabled);
         initialized = true;
     }
 

@@ -10,12 +10,16 @@ package org.opensearch.parquet.writer;
 
 import org.opensearch.index.engine.dataformat.DataFormat;
 import org.opensearch.index.engine.dataformat.DocumentInput;
+import org.opensearch.index.mapper.ContentPath;
 import org.opensearch.index.mapper.KeywordFieldMapper;
 import org.opensearch.index.mapper.MappedFieldType;
+import org.opensearch.index.mapper.Mapper;
 import org.opensearch.index.mapper.MapperParsingException;
 import org.opensearch.index.mapper.NumberFieldMapper;
 import org.opensearch.parquet.ParquetBaseTests;
 import org.opensearch.parquet.engine.ParquetDataFormat;
+
+import org.opensearch.common.settings.Settings;
 
 import java.util.List;
 
@@ -257,6 +261,55 @@ public class ParquetDocumentInputTests extends ParquetBaseTests {
         FieldValuePair pair = findPair(input, "_ignored_source.tags");
         assertTrue(pair.isMultiValued());
         assertEquals(List.of("RAW-ONE", "RAW-TWO"), pair.getValue());
+    }
+
+    // A numeric field type built through the mapper Builder, so its multi_value reporting comes from
+    // the NumberFieldType constructor wiring rather than manual setters. AUTO leaves the tri-state at
+    // its default; LIST/SCALAR are applied via the shared multi_value parameter.
+    private MappedFieldType builderNumericFieldType(MappedFieldType.MultiValueState multiValue) {
+        NumberFieldMapper.Builder builder = new NumberFieldMapper.Builder("number", NumberFieldMapper.NumberType.INTEGER, false, false);
+        if (multiValue != MappedFieldType.MultiValueState.AUTO) {
+            builder.setParameterValue("multi_value", multiValue);
+        }
+        NumberFieldMapper mapper = builder.build(new Mapper.BuilderContext(Settings.EMPTY, new ContentPath()));
+        MappedFieldType ft = mapper.fieldType();
+        assignTestCapabilities(ft, PARQUET_FORMAT);
+        return ft;
+    }
+
+    public void testDeclaredMultiValueNumericSeedsListFromFirstValue() {
+        ParquetDocumentInput input = new ParquetDocumentInput();
+        populateMetadataFields(input);
+        MappedFieldType number = builderNumericFieldType(MappedFieldType.MultiValueState.LIST);
+
+        input.addField(number, 7);
+        input.addField(number, 2);
+        input.addField(number, 5);
+        input.setRowId(DocumentInput.ROW_ID_FIELD, 0L);
+
+        FieldValuePair pair = findPair(input, "number");
+        assertTrue(pair.isMultiValued());
+        // Document order is preserved on ingest; sorting is a later commit.
+        assertEquals(List.of(7, 2, 5), pair.getValue());
+        assertEquals(3L, input.getFieldCount("number"));
+    }
+
+    public void testUndeclaredNumericAutoPromotesViaMapperWiring() {
+        ParquetDocumentInput input = new ParquetDocumentInput();
+        populateMetadataFields(input);
+        // multi_value omitted: supported=true + state=AUTO must satisfy the auto-promotion guard.
+        MappedFieldType number = builderNumericFieldType(MappedFieldType.MultiValueState.AUTO);
+        assertTrue(number.isMultiValueSupported());
+        assertTrue(number.isMultiValueAutoPromotionEnabled());
+
+        input.addField(number, 10);
+        input.addField(number, 20);
+        input.setRowId(DocumentInput.ROW_ID_FIELD, 0L);
+
+        FieldValuePair pair = findPair(input, "number");
+        assertTrue(pair.isMultiValued());
+        assertEquals(List.of(10, 20), pair.getValue());
+        assertEquals(2L, input.getFieldCount("number"));
     }
 
     private static FieldValuePair findPair(ParquetDocumentInput input, String fieldName) {

@@ -140,6 +140,21 @@ public final class ParquetSettings {
         Setting.Property.IndexScope
     );
 
+    /**
+     * Whether ingest sorts each document's multi-value list ascending before writing it to the
+     * Parquet LIST column (default false). When enabled, the writer stamps the
+     * {@code opensearch.values_sorted} footer marker and the multi-valued doc-values reader can skip
+     * its own per-row sort; when disabled the reader always sorts, so correctness never depends on
+     * this. Default off because the sort costs a small, measured ingest-throughput hit that only pays
+     * back after several aggregation queries per segment. Distinct from the core {@code index.sort.*}
+     * settings, which order whole rows rather than the values within one document's list.
+     */
+    public static final Setting<Boolean> MULTI_VALUE_SORT_ENABLED = Setting.boolSetting(
+        "index.parquet.multi_value_sort_enabled",
+        false,
+        Setting.Property.IndexScope
+    );
+
     /** Bloom filter false positive probability (default 0.1). */
     public static final Setting<Double> BLOOM_FILTER_FPP = Setting.doubleSetting(
         "index.parquet.bloom_filter_fpp",
@@ -948,6 +963,7 @@ public final class ParquetSettings {
             BLOOM_FILTER_ENABLED,
             BLOOM_FILTER_FPP,
             BLOOM_FILTER_NDV,
+            MULTI_VALUE_SORT_ENABLED,
             MAX_ROWS_PER_VSR,
             SORT_IN_MEMORY_THRESHOLD,
             ROW_GROUP_MAX_ROWS,

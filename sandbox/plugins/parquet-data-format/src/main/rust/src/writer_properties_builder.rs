@@ -17,6 +17,14 @@ use crate::native_settings::NativeSettings;
 /// Parquet file-level metadata key for the writer generation.
 pub const WRITER_GENERATION_KEY: &str = "opensearch.writer_generation";
 
+/// Parquet file-level marker: present with value `"true"` iff ingest sorted each document's
+/// multi-value list ascending. The read path (`SortedNumericDocValues`) SKIPS its own per-row
+/// ascending sort when this marker reads true, so it must be stamped ONLY when the sort actually
+/// ran — a marker stamped while the sort was off makes the reader return unsorted values and
+/// compute min/max silently wrong. An absent or non-"true" marker means the reader sorts, which is
+/// correct for every file written before this feature and every file written with the sort off.
+pub const VALUES_SORTED_KEY: &str = "opensearch.values_sorted";
+
 // The format-version key, current version, sentinel, and long encoding live in
 // native-bridge-common so the reader side (doc-values cursor) shares them without depending on
 // this crate. Re-exported here so writer-side callers keep one import path.
@@ -139,13 +147,19 @@ impl WriterPropertiesBuilder {
         config: &NativeSettings,
         schema: &ArrowSchema,
     ) -> Result<WriterProperties, String> {
-        Self::build_with_generation(config, None, schema)
+        // No generation and no values-sorted claim: the plain build path never sorts per-row lists.
+        Self::build_with_generation(config, None, false, schema)
     }
 
     /// Builds WriterProperties with an optional writer generation stored as key-value metadata.
+    ///
+    /// `values_sorted` stamps the [`VALUES_SORTED_KEY`] marker: pass `true` ONLY when ingest sorted
+    /// each document's multi-value list ascending for this file. See [`VALUES_SORTED_KEY`] for why a
+    /// dishonest `true` silently corrupts read-side min/max.
     pub fn build_with_generation(
         config: &NativeSettings,
         writer_generation: Option<i64>,
+        values_sorted: bool,
         schema: &ArrowSchema,
     ) -> Result<WriterProperties, String> {
         let mut builder = WriterProperties::builder();
@@ -175,6 +189,17 @@ impl WriterPropertiesBuilder {
             kv_metadata.push(KeyValue::new(
                 WRITER_GENERATION_KEY.to_string(),
                 Some(gen.to_string()),
+            ));
+        }
+        // Stamp the values-sorted marker ONLY when ingest actually sorted each row's multi-value
+        // list. The reader skips its own ascending sort when this key reads "true", so stamping it
+        // while the sort was off would make the reader return unsorted values and compute min/max
+        // silently wrong (the reader has no way to detect the lie). Omitting the key (rather than
+        // writing "false") keeps "absent" the default-safe state the reader already sorts on.
+        if values_sorted {
+            kv_metadata.push(KeyValue::new(
+                VALUES_SORTED_KEY.to_string(),
+                Some("true".to_string()),
             ));
         }
         builder = builder.set_key_value_metadata(Some(kv_metadata));
@@ -1397,7 +1422,7 @@ mod tests {
     fn test_build_with_generation_stamps_both() {
         let config = NativeSettings::default();
         let schema = ArrowSchema::new(Vec::<Field>::new());
-        let props = WriterPropertiesBuilder::build_with_generation(&config, Some(42), &schema)
+        let props = WriterPropertiesBuilder::build_with_generation(&config, Some(42), false, &schema)
             .expect("build failed");
         let kv = props.key_value_metadata().expect("KV metadata missing");
         let has_format = kv
@@ -1408,6 +1433,47 @@ mod tests {
             .any(|k| k.key == WRITER_GENERATION_KEY && k.value.as_deref() == Some("42"));
         assert!(has_format, "format_version stamp missing");
         assert!(has_gen, "writer_generation stamp missing");
+    }
+
+    #[test]
+    fn test_values_sorted_marker_omitted_when_false() {
+        // Guards the footgun (T7a): with the ingest sort off, the marker must be ABSENT so the
+        // reader keeps sorting. Removing the gating in build_with_generation turns this red.
+        let config = NativeSettings::default();
+        let schema = ArrowSchema::new(Vec::<Field>::new());
+        let props = WriterPropertiesBuilder::build_with_generation(&config, Some(1), false, &schema)
+            .expect("build failed");
+        let kv = props.key_value_metadata().expect("KV metadata missing");
+        assert!(
+            kv.iter().all(|k| k.key != VALUES_SORTED_KEY),
+            "values_sorted must not be stamped when the sort did not run"
+        );
+    }
+
+    #[test]
+    fn test_values_sorted_marker_stamped_when_true() {
+        // Symmetric to the above: when ingest sorted each row's list, the marker is present and
+        // reads exactly "true" (the value the tri-state reader decodes as sorted).
+        let config = NativeSettings::default();
+        let schema = ArrowSchema::new(Vec::<Field>::new());
+        let props = WriterPropertiesBuilder::build_with_generation(&config, Some(1), true, &schema)
+            .expect("build failed");
+        let kv = props.key_value_metadata().expect("KV metadata missing");
+        assert!(
+            kv.iter()
+                .any(|k| k.key == VALUES_SORTED_KEY && k.value.as_deref() == Some("true")),
+            "values_sorted=true must be stamped when the sort ran"
+        );
+    }
+
+    #[test]
+    fn test_build_never_stamps_values_sorted() {
+        // The plain build() path never sorts per-row lists, so it must never stamp the marker.
+        let config = NativeSettings::default();
+        let schema = ArrowSchema::new(Vec::<Field>::new());
+        let props = WriterPropertiesBuilder::build(&config, &schema).expect("build failed");
+        let kv = props.key_value_metadata().expect("KV metadata missing");
+        assert!(kv.iter().all(|k| k.key != VALUES_SORTED_KEY));
     }
 
     /// A LIST column's leaf lives at `<field>.list.element`; a single-segment path would miss it

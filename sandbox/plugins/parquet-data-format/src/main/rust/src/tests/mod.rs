@@ -40,6 +40,7 @@ fn test_create_writer_invalid_path() {
         vec![],
         vec![],
         0,
+        false,
     );
     assert!(result.is_err());
     cleanup_ffi_schema(schema_ptr);
@@ -56,6 +57,7 @@ fn test_create_writer_invalid_schema_pointer() {
         vec![],
         vec![],
         0,
+        false,
     );
     assert!(result.is_err());
     assert!(result
@@ -80,6 +82,7 @@ fn test_create_writer_same_file_removes_stale_and_succeeds() {
         vec![],
         vec![],
         0,
+        false,
     );
     assert!(result2.is_ok());
     assert!(NativeParquetWriter::has_writer(&filename));
@@ -392,6 +395,7 @@ fn test_ipc_staging_same_file_removes_stale_and_succeeds() {
         vec![false],
         vec![false],
         0,
+        false,
     );
     assert!(result.is_ok());
     assert!(NativeParquetWriter::has_writer(&filename));
@@ -536,6 +540,7 @@ fn test_ipc_staging_concurrent_sorted_writers() {
                 vec![false],
                 vec![false],
                 0,
+                false,
             )
             .is_ok()
             {
@@ -701,6 +706,7 @@ fn test_concurrent_writer_creation() {
                 vec![],
                 vec![],
                 0,
+                false,
             )
             .is_ok()
             {
@@ -856,6 +862,7 @@ fn test_bloom_filter_false_propagates_through_settings_store() {
         vec![],
         vec![],
         0,
+        false,
     );
     assert!(result.is_ok());
 
@@ -887,6 +894,7 @@ fn test_bloom_filter_default_when_no_settings() {
         vec![],
         vec![],
         0,
+        false,
     );
     assert!(result.is_ok());
 
@@ -1078,6 +1086,7 @@ fn test_chunked_writer_single_chunk_row_ids_sequential() {
         vec![false],
         vec![false],
         0,
+        false,
     );
     assert!(result.is_ok(), "create_writer failed: {:?}", result.err());
 
@@ -1150,6 +1159,7 @@ fn test_chunked_writer_multi_chunk_row_ids_sequential() {
         vec![false],
         vec![false],
         0,
+        false,
     );
     assert!(result.is_ok(), "create_writer failed: {:?}", result.err());
 
@@ -1237,6 +1247,7 @@ fn test_chunked_writer_multi_chunk_descending_sort() {
         vec![true],
         vec![false],
         0,
+        false,
     )
     .unwrap();
 
@@ -1303,6 +1314,7 @@ fn test_chunked_writer_multiple_write_calls() {
         vec![false],
         vec![false],
         0,
+        false,
     )
     .unwrap();
 
@@ -1384,6 +1396,7 @@ fn test_chunked_writer_empty_finalize() {
         vec![false],
         vec![false],
         0,
+        false,
     )
     .unwrap();
 
@@ -1431,6 +1444,7 @@ fn test_chunked_writer_permutation_is_invertible() {
         vec![false],
         vec![false],
         0,
+        false,
     )
     .unwrap();
 
@@ -1498,6 +1512,7 @@ fn test_chunked_writer_large_dataset_multi_chunk() {
         vec![false],
         vec![false],
         0,
+        false,
     )
     .unwrap();
 
@@ -1592,6 +1607,7 @@ fn test_chunked_writer_generation_in_metadata_single_chunk() {
         vec![false],
         vec![false],
         writer_generation,
+        false,
     )
     .unwrap();
 
@@ -1639,6 +1655,7 @@ fn test_chunked_writer_generation_in_metadata_multi_chunk() {
         vec![false],
         vec![false],
         writer_generation,
+        false,
     )
     .unwrap();
 
@@ -1703,6 +1720,7 @@ fn test_chunked_writer_generation_zero() {
         vec![false],
         vec![false],
         0,
+        false,
     )
     .unwrap();
 
@@ -1744,6 +1762,7 @@ fn test_chunked_writer_generation_large_value() {
         vec![false],
         vec![false],
         writer_generation,
+        false,
     )
     .unwrap();
 
@@ -1818,6 +1837,7 @@ fn test_unsorted_writer_generation_in_metadata() {
         vec![],
         vec![],
         writer_generation,
+        false,
     )
     .unwrap();
 
@@ -1867,6 +1887,7 @@ fn test_chunked_writer_crc32_single_chunk() {
         vec![false],
         vec![false],
         0,
+        false,
     )
     .unwrap();
 
@@ -1919,6 +1940,7 @@ fn test_chunked_writer_crc32_multi_chunk() {
         vec![false],
         vec![false],
         0,
+        false,
     )
     .unwrap();
 
@@ -1981,6 +2003,7 @@ fn test_chunked_writer_crc32_differs_for_different_data() {
         vec![false],
         vec![false],
         0,
+        false,
     )
     .unwrap();
     let (ap1, sp1) = create_ffi_data_with_row_id(
@@ -2003,6 +2026,7 @@ fn test_chunked_writer_crc32_differs_for_different_data() {
         vec![false],
         vec![false],
         0,
+        false,
     )
     .unwrap();
     let (ap2, sp2) = create_ffi_data_with_row_id(
@@ -2055,6 +2079,7 @@ fn test_chunked_writer_batch_slicing_large_batch() {
         vec![false],
         vec![false],
         0,
+        false,
     )
     .unwrap();
 
@@ -2140,6 +2165,7 @@ fn test_chunked_writer_batch_slicing_two_rows_per_slice() {
         vec![false],
         vec![false],
         0,
+        false,
     )
     .unwrap();
 
@@ -2225,6 +2251,7 @@ fn test_chunked_writer_batch_slicing_descending() {
         vec![true],
         vec![false],
         0,
+        false,
     )
     .unwrap();
 
@@ -2284,6 +2311,7 @@ fn test_chunked_writer_batch_slicing_multiple_writes() {
         vec![false],
         vec![false],
         0,
+        false,
     )
     .unwrap();
 
@@ -2393,6 +2421,7 @@ fn test_chunked_writer_no_row_id_single_chunk() {
         vec![false],
         vec![false],
         0,
+        false,
     )
     .unwrap();
 
@@ -2446,6 +2475,7 @@ fn test_chunked_writer_no_row_id_multi_chunk() {
         vec![false],
         vec![false],
         0,
+        false,
     )
     .unwrap();
 
@@ -2508,6 +2538,7 @@ fn test_chunked_writer_no_row_id_batch_slicing() {
         vec![true],
         vec![false],
         0,
+        false,
     )
     .unwrap();
 
@@ -2644,6 +2675,7 @@ fn test_multi_column_sort_age_asc_score_desc() {
         vec![false, true],
         vec![false, false],
         0,
+        false,
     )
     .unwrap();
 
@@ -2714,6 +2746,7 @@ fn test_multi_column_sort_age_desc_score_asc() {
         vec![true, false],
         vec![false, false],
         0,
+        false,
     )
     .unwrap();
 
@@ -2763,6 +2796,7 @@ fn test_multi_column_sort_multi_chunk() {
         vec![false, false],
         vec![false, false],
         0,
+        false,
     )
     .unwrap();
 
@@ -2840,6 +2874,7 @@ fn test_multi_column_sort_batch_slicing() {
         vec![false, true],
         vec![false, false],
         0,
+        false,
     )
     .unwrap();
 
@@ -2946,6 +2981,7 @@ fn test_nulls_first_true_ascending() {
         vec![false],
         vec![true],
         0,
+        false,
     )
     .unwrap();
 
@@ -2985,6 +3021,7 @@ fn test_nulls_first_false_ascending() {
         vec![false],
         vec![false],
         0,
+        false,
     )
     .unwrap();
 
@@ -3068,6 +3105,7 @@ fn test_nulls_first_with_row_id_and_permutation() {
         vec![false],
         vec![true],
         0,
+        false,
     )
     .unwrap();
 
@@ -3136,6 +3174,7 @@ fn test_nulls_last_with_row_id_and_permutation() {
         vec![false],
         vec![false],
         0,
+        false,
     )
     .unwrap();
 
@@ -3202,6 +3241,7 @@ fn test_empty_batch_write_does_not_corrupt_sorted_writer() {
         vec![false],
         vec![false],
         0,
+        false,
     )
     .unwrap();
 
@@ -3256,6 +3296,7 @@ fn test_only_empty_batches_produces_empty_output() {
         vec![false],
         vec![false],
         0,
+        false,
     )
     .unwrap();
 
@@ -3299,6 +3340,7 @@ fn test_memory_usage_ipc_writer_reports_chunk_row_ids() {
         vec![false],
         vec![false],
         0,
+        false,
     )
     .unwrap();
 
@@ -3382,6 +3424,7 @@ fn test_memory_usage_path_prefix_filtering() {
         vec![false],
         vec![false],
         0,
+        false,
     )
     .unwrap();
 
@@ -3395,6 +3438,7 @@ fn test_memory_usage_path_prefix_filtering() {
         vec![false],
         vec![false],
         0,
+        false,
     )
     .unwrap();
 
@@ -3484,6 +3528,7 @@ fn test_sort_all_identical_keys_produces_valid_permutation() {
         vec![false],
         vec![false],
         0,
+        false,
     )
     .unwrap();
 
@@ -3603,6 +3648,7 @@ fn test_writer_properties_honored_empty_path() {
         vec![false],
         vec![false],
         writer_generation,
+        false,
     )
     .unwrap();
 
@@ -3657,6 +3703,7 @@ fn test_writer_properties_honored_single_chunk_snappy_no_bloom() {
         vec![false],
         vec![false],
         writer_generation,
+        false,
     )
     .unwrap();
 
@@ -3734,6 +3781,7 @@ fn test_writer_properties_honored_single_chunk_zstd_with_bloom() {
         vec![false],
         vec![false],
         writer_generation,
+        false,
     )
     .unwrap();
 
@@ -3796,6 +3844,7 @@ fn test_writer_properties_honored_multi_chunk_snappy_no_bloom() {
         vec![false],
         vec![false],
         writer_generation,
+        false,
     )
     .unwrap();
 
@@ -3876,6 +3925,7 @@ fn test_writer_properties_honored_multi_chunk_zstd_with_bloom() {
         vec![false],
         vec![false],
         writer_generation,
+        false,
     )
     .unwrap();
 
@@ -3948,6 +3998,7 @@ fn test_writer_properties_honored_single_chunk_uncompressed() {
         vec![false],
         vec![false],
         0,
+        false,
     )
     .unwrap();
 
@@ -4000,6 +4051,7 @@ fn test_writer_properties_honored_multi_chunk_uncompressed() {
         vec![false],
         vec![false],
         0,
+        false,
     )
     .unwrap();
 
@@ -4067,6 +4119,7 @@ fn test_writer_properties_defaults_single_chunk() {
         vec![false],
         vec![false],
         0,
+        false,
     )
     .unwrap();
 
@@ -4121,6 +4174,7 @@ fn test_writer_properties_defaults_multi_chunk() {
         vec![false],
         vec![false],
         0,
+        false,
     )
     .unwrap();
 

@@ -83,6 +83,7 @@ pub fn create_writer_and_assert_success(filename: &str) -> (Arc<Schema>, i64) {
         vec![],
         vec![],
         0,
+        false,
     );
     assert!(result.is_ok());
     (schema, schema_ptr)
@@ -102,6 +103,7 @@ pub fn create_sorted_writer_and_assert_success(
         vec![reverse],
         vec![false],
         0,
+        false,
     );
     assert!(result.is_ok());
     (schema, schema_ptr)

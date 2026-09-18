@@ -108,9 +108,16 @@ impl MergeContext {
             .map(|r| r.clone())
             .unwrap_or_default();
         let writer_props = Arc::new(
+            // The k-way merge concatenates input row groups without re-sorting each document's
+            // multi-value list, so it CANNOT honestly claim the values are sorted (inputs may be
+            // unmarked/unsorted, and the merge preserves whatever order each row already had).
+            // Pass false unconditionally: an unmarked merge output makes the reader sort, which is
+            // always correct. Deriving this from config.multi_value_sort_enabled would be the
+            // footgun — it describes the ingest writer, not this merge.
             WriterPropertiesBuilder::build_with_generation(
                 &config,
                 Some(output_writer_generation),
+                false,
                 &output_schema,
             )
             .map_err(|e| {
