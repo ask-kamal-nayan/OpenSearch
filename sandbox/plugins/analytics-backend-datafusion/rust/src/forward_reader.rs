@@ -15,7 +15,8 @@
 //!
 //! The reader works over either a local file (fast path) or a DataFusion
 //! object-store [`AsyncFileReader`] (remote/tiered storage), selected by
-//! [`ParquetForwardBatchReaderFactory`]. Repeated (multi-valued) columns are not
+//! [`ParquetForwardBatchReaderFactory`]. Single-level repeated (multi-valued)
+//! columns are served one List per row; nested (multi-level) repetition is not
 //! supported yet.
 //!
 //! The factory holds everything a reader needs to be rebuilt without new IO: the
@@ -73,6 +74,10 @@ pub struct ParquetForwardBatchReader {
     position: usize,
     row_count: usize,
     pages: Vec<ParquetForwardPage>,
+    // Physical shape of the projected column, read from the file's own schema at open. Kept as a
+    // field because it is fixed for the reader's lifetime and the metadata is not otherwise
+    // retained. See `is_repeated`.
+    repeated: bool,
 }
 
 /// Reusable factory for independent forward readers over the same file,
@@ -196,6 +201,11 @@ impl ParquetForwardBatchReader {
         T: ChunkReader + 'static,
     {
         let pages = projected_pages(&metadata, &projection)?;
+        // Read the projected column's physical shape from the file schema once, at open. The
+        // mapping and the file can legitimately disagree here after a scalar-to-LIST promotion (the
+        // mapping reports LIST for every segment while segments written earlier are still scalar),
+        // so this on-disk signal, not the mapping, is what the read path routes each segment on.
+        let repeated = projected_is_repeated(&metadata, &projection)?;
 
         let row_count = usize::try_from(metadata.file_metadata().num_rows()).map_err(|_| {
             ArrowParquetError::General("Parquet row count does not fit in usize".to_string())
@@ -214,6 +224,7 @@ impl ParquetForwardBatchReader {
             position: 0,
             row_count,
             pages,
+            repeated,
         })
     }
 
@@ -306,6 +317,13 @@ impl ParquetForwardBatchReader {
         self.row_count
     }
 
+    /// Whether the projected column is physically repeated (a Parquet LIST, `max_rep_level >= 1`)
+    /// in this file. Read from the file's own schema at open, so it reflects the on-disk shape
+    /// rather than the mapping declaration; the read path routes each segment on this value.
+    pub fn is_repeated(&self) -> bool {
+        self.repeated
+    }
+
     /// Number of physical rows in the page containing `target_row`.
     pub fn page_row_count(&self, target_row: usize) -> ParquetResult<usize> {
         Ok(self.page_at(target_row)?.row_count)
@@ -332,11 +350,34 @@ impl ParquetForwardBatchReader {
     }
 }
 
+/// Whether the single projected leaf column is physically repeated (a Parquet LIST, i.e.
+/// `max_rep_level >= 1`) on disk. Derived from the file's own schema, so it reports what is actually
+/// stored rather than what the mapping declares; the two diverge after a scalar-to-LIST promotion,
+/// and routing on the mapping would then hand an older, physically scalar segment to the repeated
+/// read path. Enforces the same single-projected-leaf-column contract as [`projected_pages`].
+fn projected_is_repeated(
+    metadata: &ParquetMetaData,
+    projection: &ProjectionMask,
+) -> ParquetResult<bool> {
+    let schema = metadata.file_metadata().schema_descr();
+    let projected_columns = (0..schema.num_columns())
+        .filter(|&column_idx| projection.leaf_included(column_idx))
+        .collect::<Vec<_>>();
+    let [column_idx] = projected_columns.as_slice() else {
+        return Err(ArrowParquetError::General(format!(
+            "ParquetForwardBatchReader requires exactly one projected leaf column, got {}",
+            projected_columns.len()
+        )));
+    };
+    Ok(schema.column(*column_idx).max_rep_level() >= 1)
+}
+
 /// Builds the per-page table for the single projected leaf column.
 ///
 /// Requires exactly one projected leaf column with an OffsetIndex on every
-/// non-empty row group. Repeated (multi-valued) columns are rejected until the
-/// repeated read path is implemented.
+/// non-empty row group. Single-level repetition is accepted (page bounds stay
+/// row-indexed); nested (multi-level) repeated columns are rejected until the
+/// nested read path is implemented.
 fn projected_pages(
     metadata: &ParquetMetaData,
     projection: &ProjectionMask,
@@ -352,10 +393,23 @@ fn projected_pages(
         )));
     };
     let column_idx = *column_idx;
-    // TODO: add support for repeated columns
-    if schema.column(column_idx).max_rep_level() > 0 {
+    // Single-level repetition (max_rep_level == 1), i.e. a flat list of values per row, is served on
+    // this path: the OffsetIndex page locations this table is built from are row-indexed, not
+    // value-indexed, so `first_row`/`row_count` and the forward skip model in `read_batch_at` stay
+    // correct (Arrow's reader skips and materialises whole records, one List per row). Only the
+    // all-null shortcut below is unreliable for a list column - neither the `is_null_page` flag nor
+    // the leaf `null_count` reliably implies an all-null page there (the ColumnIndex counts leaf
+    // slots, not rows; see the `max_rep_level == 0` gate below for the full derivation). The entire
+    // shortcut is therefore gated to scalar columns, leaving list columns to normal decoding.
+    //
+    // TODO: add support for nested (multi-level) repeated columns. max_rep_level > 1 is a list of
+    // lists: a single row then spans repetition boundaries that need not align to the row-indexed
+    // page bounds this reader assumes, so decoding it here could silently mis-slice rows. Rejected
+    // with a precise message until that path is built.
+    let max_rep_level = schema.column(column_idx).max_rep_level();
+    if max_rep_level > 1 {
         return Err(ArrowParquetError::General(
-            "ParquetForwardBatchReader does not support repeated columns yet".to_string(),
+            "ParquetForwardBatchReader does not support nested repeated columns yet".to_string(),
         ));
     }
 
@@ -418,9 +472,31 @@ fn projected_pages(
                     .then(|| index.null_count(page_idx))
                     .flatten()
             });
-            let all_null = page_statistics.is_some_and(|index| {
-                page_idx < index.num_pages() as usize && index.is_null_page(page_idx)
-            }) || null_count == Some((end - start) as i64);
+            // A page is treated as all-null only for scalar columns (max_rep_level == 0); the
+            // entire shortcut is gated because BOTH signals it relies on are unreliable for
+            // repeated columns:
+            //
+            //   * `is_null_page`: arrow-rs derives the ColumnIndex null-page flag as
+            //     `null_page = (num_buffered_rows == num_page_nulls)`
+            //     (build/patched/parquet-58.3.0/src/column/writer/mod.rs:790), where
+            //     `num_page_nulls` counts null LEAF slots (accumulated at :677) while
+            //     `num_buffered_rows` counts ROWS (accumulated at :710). Those two counts are only
+            //     interchangeable when max_rep_level == 0. For a single-level list column they
+            //     diverge, so the flag can be set true on a page that still holds real data -
+            //     empirically, an ArrowWriter-written ListArray of `[null], [null, null], [10]`
+            //     yields one page reporting is_null_page == true and null_count == Some(3) while
+            //     readback confirms the value 10 is present in that same page.
+            //   * `null_count == row count`: the ColumnIndex leaf-value null_count only equals the
+            //     row count when each row holds exactly one leaf value, i.e. max_rep_level == 0.
+            //
+            // Because `read_batch_at` skips an all-null page and substitutes `new_null_array`
+            // without decoding, firing either signal on a repeated column would be silent data
+            // loss. Gating on max_rep_level == 0 keeps the scalar optimisation byte-for-byte while
+            // forcing repeated columns to always decode.
+            let all_null = max_rep_level == 0
+                && (page_statistics.is_some_and(|index| {
+                    page_idx < index.num_pages() as usize && index.is_null_page(page_idx)
+                }) || null_count == Some((end - start) as i64));
             pages.push(ParquetForwardPage {
                 first_row: row_group_start + start,
                 row_count: end - start,
@@ -474,8 +550,10 @@ impl ChunkReader for AsyncFileChunkReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datafusion::arrow::array::{Array, ArrayRef, Int32Array};
-    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::arrow::array::{
+        Array, ArrayRef, Int32Array, Int32Builder, ListArray, ListBuilder,
+    };
+    use datafusion::arrow::datatypes::{DataType, Field, Int32Type, Schema};
     use datafusion::parquet::arrow::ArrowWriter;
     use datafusion::parquet::file::metadata::{
         FileMetaData, PageIndexPolicy, ParquetMetaDataBuilder, ParquetMetaDataReader,
@@ -514,6 +592,36 @@ mod tests {
         (File::from(file), Arc::new(metadata))
     }
 
+    /// Writes a single-column fixture over an arbitrary Arrow column - list or scalar - with the
+    /// same row-group/page/OffsetIndex settings as [`write_fixture`], returning just the metadata
+    /// that [`projected_pages`] reads. `write_fixture` is Int32-scalar only; this lets the
+    /// repeated-column tests below drive `projected_pages` over a real list schema written by
+    /// `ArrowWriter`, following the precedent that a single-level `ListArray` writes cleanly here.
+    fn metadata_for_column(column: ArrayRef) -> Arc<ParquetMetaData> {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            column.data_type().clone(),
+            true,
+        )]));
+        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![column]).unwrap();
+        let file = tempfile::tempfile().unwrap();
+        let properties = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(8))
+            .set_data_page_row_count_limit(3)
+            .set_write_batch_size(3)
+            .set_offset_index_disabled(false)
+            .build();
+        let mut writer =
+            ArrowWriter::try_new(file.try_clone().unwrap(), schema, Some(properties)).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        ParquetMetaDataReader::new()
+            .with_page_index_policy(PageIndexPolicy::Required)
+            .parse_and_finish(&file)
+            .map(Arc::new)
+            .unwrap()
+    }
+
     /// Opens a forward reader over the single column of a fixture file.
     fn reader_for(values: Vec<Option<i32>>) -> ParquetForwardBatchReader {
         let (file, metadata) = write_fixture(values);
@@ -524,6 +632,49 @@ mod tests {
 
     fn dense_reader() -> ParquetForwardBatchReader {
         reader_for((0..20).map(Some).collect())
+    }
+
+    /// Opens a forward reader over a single-level `list<int32>` column, for the repeated-shape
+    /// probe: a physically repeated column that `is_repeated` must report as repeated.
+    fn list_reader() -> ParquetForwardBatchReader {
+        let list = ListArray::from_iter_primitive::<Int32Type, _, _>(vec![
+            Some(vec![Some(1), Some(2)]),
+            Some(vec![Some(3)]),
+            None,
+            Some(vec![Some(4), Some(5), Some(6)]),
+            Some(vec![]),
+        ]);
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            list.data_type().clone(),
+            true,
+        )]));
+        let column: ArrayRef = Arc::new(list);
+        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![column]).unwrap();
+        let file = tempfile::tempfile().unwrap();
+        let properties = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(8))
+            .set_data_page_row_count_limit(3)
+            .set_write_batch_size(3)
+            .set_offset_index_disabled(false)
+            .build();
+        let mut writer =
+            ArrowWriter::try_new(file.try_clone().unwrap(), schema, Some(properties)).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let metadata = ParquetMetaDataReader::new()
+            .with_page_index_policy(PageIndexPolicy::Required)
+            .parse_and_finish(&file)
+            .map(Arc::new)
+            .unwrap();
+        let projection = ProjectionMask::leaves(metadata.file_metadata().schema_descr(), [0]);
+        ParquetForwardBatchReader::try_new_with_chunk_reader(
+            File::from(file),
+            metadata,
+            projection,
+            4096,
+        )
+        .unwrap()
     }
 
     fn ints(batch: &RecordBatch) -> Vec<Option<i32>> {
@@ -640,5 +791,87 @@ mod tests {
         // Next page decodes normally.
         let next = reader.read_batch_at(6, 2).unwrap().unwrap();
         assert_eq!(ints(&next), vec![Some(6), Some(7)]);
+    }
+
+    /// A physically repeated column (a single-level `list<int32>`) must report repeated, so the read
+    /// path routes it to the list reader regardless of what the mapping later declares. Falsifiable:
+    /// weakening `projected_is_repeated`'s threshold (e.g. to `>= 2`) makes this fail.
+    #[test]
+    fn is_repeated_true_for_single_level_list_column() {
+        assert!(list_reader().is_repeated());
+    }
+
+    /// A physically scalar column must report not-repeated even though a promoted mapping might
+    /// declare it multi-valued: that is what lets an older scalar segment fall through to the scalar
+    /// path instead of being handed to the list reader and failing the list downcast.
+    #[test]
+    fn is_repeated_false_for_scalar_column() {
+        assert!(!dense_reader().is_repeated());
+    }
+
+    /// A single-level repeated column (`max_rep_level == 1`) - one flat list of values per row - is
+    /// now served on the forward path, so `projected_pages` must accept it and yield decodable
+    /// pages. Before C1 any `max_rep_level > 0` was rejected; reverting the bound back to `> 0`
+    /// makes this fail, which is what keeps the test honest.
+    #[test]
+    fn single_level_repeated_column_is_accepted() {
+        let list = ListArray::from_iter_primitive::<Int32Type, _, _>(vec![
+            Some(vec![Some(1), Some(2)]),
+            Some(vec![Some(3)]),
+            None,
+            Some(vec![Some(4), Some(5), Some(6)]),
+            Some(vec![]),
+        ]);
+        let metadata = metadata_for_column(Arc::new(list));
+        let schema = metadata.file_metadata().schema_descr();
+        assert_eq!(
+            schema.column(0).max_rep_level(),
+            1,
+            "fixture must be single-level repeated for this test to prove anything"
+        );
+        let projection = ProjectionMask::leaves(schema, [0]);
+        let pages = projected_pages(&metadata, &projection)
+            .expect("a single-level repeated column must be accepted");
+        assert!(
+            !pages.is_empty(),
+            "the accepted list column must still yield decodable pages"
+        );
+    }
+
+    /// A nested (multi-level) repeated column (`max_rep_level > 1`) has no forward read path yet, so
+    /// `projected_pages` must reject it with the precise nested-column message rather than silently
+    /// mis-slicing rows across repetition boundaries the row-indexed page bounds do not track.
+    #[test]
+    fn nested_repeated_column_is_still_rejected() {
+        // list<list<int32>>: each row is a list of inner lists, so the leaf's max_rep_level is 2.
+        let mut builder = ListBuilder::new(ListBuilder::new(Int32Builder::new()));
+        // row 0: [[1, 2], [3]]
+        builder.values().values().append_value(1);
+        builder.values().values().append_value(2);
+        builder.values().append(true);
+        builder.values().values().append_value(3);
+        builder.values().append(true);
+        builder.append(true);
+        // row 1: [[4]]
+        builder.values().values().append_value(4);
+        builder.values().append(true);
+        builder.append(true);
+        let nested = builder.finish();
+
+        let metadata = metadata_for_column(Arc::new(nested));
+        let schema = metadata.file_metadata().schema_descr();
+        assert_eq!(
+            schema.column(0).max_rep_level(),
+            2,
+            "fixture must be nested-repeated for this test to prove anything"
+        );
+        let projection = ProjectionMask::leaves(schema, [0]);
+        let error = projected_pages(&metadata, &projection)
+            .expect_err("a nested repeated column must be rejected")
+            .to_string();
+        assert!(
+            error.contains("does not support nested repeated columns yet"),
+            "{error}"
+        );
     }
 }

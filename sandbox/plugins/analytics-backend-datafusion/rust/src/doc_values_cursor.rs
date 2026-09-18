@@ -27,7 +27,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
-use arrow::array::Array;
+use arrow::array::{Array, ListArray};
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 use dashmap::DashMap;
@@ -67,6 +67,20 @@ const RC_EOF: i64 = 2;
 /// Store pointer meaning "read from the local filesystem", which is every hot shard. Mirrors
 /// `ParquetColumnReader.LOCAL_STORE` on the Java side.
 const LOCAL_STORE: i64 = 0;
+
+/// Footer key-value marker recording whether the writer already sorted each row's values ascending.
+/// Written by the ingest-time sort added in a later commit; read here so the reader can skip its own
+/// per-row sort when - and only when - the writer provably did it.
+const VALUES_SORTED_KEY: &str = "opensearch.values_sorted";
+
+/// Tri-state wire encoding of [`VALUES_SORTED_KEY`], written through `out_values_sorted`. This must
+/// NOT be collapsed to a boolean: "absent" (`-1`) is every file written before this feature and
+/// every file written with the ingest sort off, and the reader MUST sort those, so it has to stay
+/// distinguishable from an explicit "false" (`0`). Only a present-and-true marker (`1`) is
+/// permission to skip the read-side sort.
+const VALUES_SORTED_TRUE: i64 = 1;
+const VALUES_SORTED_FALSE: i64 = 0;
+const VALUES_SORTED_ABSENT: i64 = -1;
 
 static NEXT_HANDLE: AtomicI64 = AtomicI64::new(1); // 0 is never a live handle
 static CURSORS: Lazy<DashMap<i64, Arc<Mutex<DocValuesCursor>>>> = Lazy::new(DashMap::new);
@@ -207,7 +221,18 @@ impl DocValuesCursor {
             footer.file_metadata().key_value_metadata(),
         )?;
         let data_type = leaf_schema.field(0).data_type();
-        if BorrowKind::for_arrow(data_type).is_none() {
+        // A single-level repeated column decodes to `List(primitive)`, which the repeated read path
+        // (`parquet_df_next_list_batch`) serves one List per row; the borrowable kind is the child's,
+        // so unwrap one list level before checking it. A nested list-of-list is still rejected here,
+        // because its unwrapped child is itself a `List`, which has no `BorrowKind` - matching the
+        // `max_rep_level > 1` rejection in `projected_pages`. `LargeList`/`FixedSizeList` are left out
+        // deliberately: the list export downcasts to the i32-offset `ListArray` only. The scalar case
+        // is unchanged (its data type is the primitive itself).
+        let borrowable_leaf = match data_type {
+            DataType::List(field) => field.data_type(),
+            other => other,
+        };
+        if BorrowKind::for_arrow(borrowable_leaf).is_none() {
             return Err(DataFusionError::NotImplemented(format!(
                 "unsupported type {data_type} for column '{column}'"
             )));
@@ -457,6 +482,50 @@ fn borrowable_buffers(array: &dyn Array) -> Option<BorrowedBuffers> {
     })
 }
 
+/// The extra structure a repeated (list) batch exports on top of the flat value buffers a
+/// single-valued batch carries: the per-row list offsets that let Java carve the flattened child
+/// values back into one list per row.
+struct BorrowedListBuffers {
+    /// Buffers of the flattened child value array, borrowed through [`borrowable_buffers`] so the
+    /// flat-value contract Java already reads for the single-valued path is byte-for-byte identical.
+    values: BorrowedBuffers,
+    /// Start of the `i32` offsets buffer, already positioned at this batch's row 0. Java reads
+    /// `row_count + 1` offsets; row `r`'s values are the child range `offsets[r]..offsets[r + 1]`.
+    offsets_addr: usize,
+    /// Number of child values backing this batch, i.e. how far Java may read through
+    /// `values.values_addr`. Equals the final offset for a freshly decoded batch (whose offsets
+    /// start at 0), so the offset values index the child buffer directly.
+    value_count: usize,
+}
+
+/// Exposes a `ListArray`'s child values and offsets for zero-copy per-row list reads from Java.
+///
+/// Sibling of [`borrowable_buffers`], which handles the single-valued (non-repeated) case. The
+/// child values are borrowed through exactly that function, so the flat-value buffers are the same
+/// as a single-valued batch; the list offsets are handed over as one additional buffer. Offsets are
+/// exported rather than lengths because Arrow stores offsets natively (they borrow zero-copy, like
+/// every other buffer on this path) and `row_count + 1` offsets carry strictly more than
+/// `row_count` lengths at the same cost - a length buffer would have to be materialised.
+///
+/// `None` when the column is not an `i32`-offset `ListArray`, or its child is not a borrowable
+/// primitive: the caller turns that into an error, exactly as it does for [`borrowable_buffers`].
+fn borrowable_list_buffers(array: &dyn Array) -> Option<BorrowedListBuffers> {
+    let list = array.as_any().downcast_ref::<ListArray>()?;
+    // `value_offsets()` is already sliced to this array's window: it yields `len + 1` i32 offsets
+    // starting at row 0, so any array offset is folded in here rather than exported separately.
+    let offsets_addr = list.value_offsets().as_ptr() as usize;
+    // Arrow keeps a list's child unsliced and carries the window in the offsets, so the child's own
+    // offset is 0 and `borrowable_buffers` addresses child value 0. The exported offsets are
+    // therefore absolute indices into that buffer.
+    let child = list.values();
+    let values = borrowable_buffers(child.as_ref())?;
+    Some(BorrowedListBuffers {
+        values,
+        offsets_addr,
+        value_count: child.len(),
+    })
+}
+
 /// Resolves the store a cursor reads through from a Java-supplied pointer.
 ///
 /// `0` means the shard's Parquet files are on local disk, which is every hot shard: the cursor
@@ -572,8 +641,8 @@ pub unsafe extern "C" fn parquet_df_open_iter(
 /// `store_ptr`, and on the local path still costs no extra IO once a cursor has been opened, because
 /// both share the global footer cache.
 ///
-/// Writes `out_num_rows` and `out_format_version` only on success; a caller that gets a negative
-/// return must not read them.
+/// Writes `out_num_rows`, `out_format_version` and `out_values_sorted` only on success; a caller
+/// that gets a negative return must not read them.
 #[ffm_safe]
 #[no_mangle]
 pub unsafe extern "C" fn parquet_df_file_metadata(
@@ -583,10 +652,13 @@ pub unsafe extern "C" fn parquet_df_file_metadata(
     store_ptr: i64,
     out_num_rows: *mut i64,
     out_format_version: *mut i64,
+    // Tri-state `opensearch.values_sorted` marker: 1 = true, 0 = false, -1 = absent. See
+    // `VALUES_SORTED_*`.
+    out_values_sorted: *mut i64,
 ) -> i64 {
     static FN: &str = "parquet_df_file_metadata";
     let filename = str_from_raw(file_ptr, file_len).map_err(|e| format!("{FN} file: {e}"))?;
-    if out_num_rows.is_null() || out_format_version.is_null() {
+    if out_num_rows.is_null() || out_format_version.is_null() || out_values_sorted.is_null() {
         return Err(format!("{FN}: null out-parameter"));
     }
     let runtime = io_runtime().map_err(|e| format!("{FN}: {e}"))?;
@@ -620,8 +692,22 @@ pub unsafe extern "C" fn parquet_df_file_metadata(
             })
             .unwrap_or_default(),
     );
+    // Second footer key-value scan, modelled on the FORMAT_VERSION_KEY read above. Tri-state so the
+    // reader can tell "writer sorted" from "writer wrote unsorted" from "no marker": a missing key
+    // maps to VALUES_SORTED_ABSENT rather than false, because absent must default the reader to
+    // sorting (it is every pre-feature file), and only a present-and-true marker is permission to
+    // skip that sort. Collapsing absent into false would silently license skipping the sort on files
+    // that were never sorted, returning min/max in the wrong order.
+    let values_sorted = file_metadata
+        .key_value_metadata()
+        .and_then(|kvs| kvs.iter().find(|kv| kv.key == VALUES_SORTED_KEY))
+        .map_or(VALUES_SORTED_ABSENT, |kv| match kv.value.as_deref() {
+            Some("true") => VALUES_SORTED_TRUE,
+            _ => VALUES_SORTED_FALSE,
+        });
     *out_num_rows = file_metadata.num_rows();
     *out_format_version = format_version;
+    *out_values_sorted = values_sorted;
     Ok(RC_OK)
 }
 
@@ -630,6 +716,24 @@ pub unsafe extern "C" fn parquet_df_file_metadata(
 pub unsafe extern "C" fn parquet_df_close_iter(handle: i64) -> i64 {
     CURSORS.remove(&handle);
     Ok(RC_OK)
+}
+
+/// Reports whether the cursor's projected column is physically repeated (a Parquet LIST):
+/// `1` when repeated, `0` when scalar. A `< 0` return is an error pointer.
+///
+/// Derived from the file's own schema when the cursor was opened, so it describes what is actually
+/// on disk rather than what the current mapping declares. The two diverge after a scalar-to-LIST
+/// promotion: the mapping reports LIST for every segment while segments written earlier remain
+/// scalar. Callers must therefore route per segment on this value, not on the mapping, or they hand
+/// a scalar column to the repeated reader (or vice versa) and fail the list downcast. Reads only the
+/// schema recorded at open, so it never advances the cursor and is safe to probe before iterating.
+#[ffm_safe]
+#[no_mangle]
+pub unsafe extern "C" fn parquet_df_is_repeated(handle: i64) -> i64 {
+    static FN: &str = "parquet_df_is_repeated";
+    let cursor = cursor_for(handle, FN).map_err(|e| e.to_string())?;
+    let repeated = cursor.lock().reader.is_repeated();
+    Ok(if repeated { 1 } else { 0 })
 }
 
 /// Rewinds a cursor to row zero, rebuilding the Parquet decoder while reusing the resolved metadata
@@ -710,6 +814,80 @@ pub unsafe extern "C" fn parquet_df_next_batch(
     write_out(out_validity_bit_offset, borrow.validity_bit_offset as i64);
     write_out(out_value_kind, borrow.kind);
     write_out(out_value_bit_offset, borrow.value_bit_offset as i64);
+    cursor.borrowed_batch = Some(batch);
+    Ok(RC_OK)
+}
+
+/// Advance to `target_row` and hand Java a decoded batch of *repeated* (list) values: the same flat
+/// value buffers [`parquet_df_next_batch`] exports, plus the per-row offsets Java needs to carve the
+/// flattened child values back into one list per row.
+///
+/// A NEW symbol rather than an extension of [`parquet_df_next_batch`]: that symbol's ABI is depended
+/// on by the shipped single-valued read path (upstream PR #22752), so it must stay byte-for-byte
+/// stable. Adding offsets to it would shift its out-parameter slots and break every existing caller;
+/// a sibling symbol keeps the single-valued path untouched. The two deliberately share the RC
+/// convention, the EOF handling, the batch-size bound, and the borrow lifecycle so they read as
+/// siblings - the only difference is the two extra out-parameters carrying the list structure.
+#[ffm_safe]
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn parquet_df_next_list_batch(
+    handle: i64,
+    target_row: i64,
+    out_first_row: *mut i64,
+    out_last_row: *mut i64,
+    out_values_addr: *mut i64,
+    out_validity_addr: *mut i64,
+    out_validity_bit_offset: *mut i64,
+    out_value_kind: *mut i64,
+    out_value_bit_offset: *mut i64,
+    // List structure, appended after the single-valued slots so the slots Java already reads for
+    // `parquet_df_next_batch` keep the same indices. `out_offsets_addr` is the `i32` offsets buffer
+    // at row 0 (Java reads `last_row - first_row + 2` offsets); `out_value_count` is how many child
+    // values back the batch, i.e. how far Java may read through `out_values_addr`.
+    out_offsets_addr: *mut i64,
+    out_value_count: *mut i64,
+) -> i64 {
+    static FN: &str = "parquet_df_next_list_batch";
+    let cursor = cursor_for(handle, FN).map_err(|e| e.to_string())?;
+    let mut cursor = cursor.lock();
+
+    // Released here rather than on success, so no early return below leaves buffers held. Java
+    // clears its resident batch before calling. The reservation follows the batch.
+    cursor.borrowed_batch = None;
+    cursor.reservation.resize(0);
+
+    if at_eof(&cursor, target_row, FN).map_err(|e| e.to_string())? {
+        return Ok(RC_EOF); // target is past the last row (e.g. a scan running off the end)
+    }
+
+    let batch = cursor.next_batch(target_row).map_err(|e| e.to_string())?;
+    let rows = batch.num_rows();
+    if rows == 0 || rows > cursor.max_batch_size {
+        return Err(format!(
+            "{FN}: Arrow returned {rows} rows, expected 1..={}",
+            cursor.max_batch_size
+        ));
+    }
+
+    // Scoped so the borrow ends before `batch` moves onto the cursor; `BorrowedListBuffers` holds
+    // plain addresses.
+    let borrow = {
+        let array = batch.column(0); // single projected column, a ListArray for a repeated column
+        borrowable_list_buffers(array.as_ref())
+            .ok_or_else(|| format!("{FN}: unsupported array type {}", array.data_type()))?
+    };
+
+    // Written only once the export is known good, so a failed call leaves them untouched.
+    write_out(out_first_row, target_row);
+    write_out(out_last_row, target_row + rows as i64 - 1); // inclusive last row of this batch
+    write_out(out_values_addr, borrow.values.values_addr as i64);
+    write_out(out_validity_addr, borrow.values.validity_addr as i64);
+    write_out(out_validity_bit_offset, borrow.values.validity_bit_offset as i64);
+    write_out(out_value_kind, borrow.values.kind);
+    write_out(out_value_bit_offset, borrow.values.value_bit_offset as i64);
+    write_out(out_offsets_addr, borrow.offsets_addr as i64);
+    write_out(out_value_count, borrow.value_count as i64);
     cursor.borrowed_batch = Some(batch);
     Ok(RC_OK)
 }
@@ -1609,6 +1787,129 @@ mod tests {
         assert_eq!(borrow.kind, BorrowKind::Long as i64);
         assert_eq!(borrow.value_bit_offset, 0);
     }
+
+    /// The list export hands Java per-row `i32` offsets over the flattened child values, and Java
+    /// carves row `r` out as the child range `offsets[r]..offsets[r + 1]`. This proves that carve
+    /// reconstructs every row of a list of DIFFERING widths - including an empty row - exactly, and
+    /// that `value_count` bounds the child buffer at `child.len()`. Every width and value is
+    /// distinct, so an off-by-one offset or a swapped offset pair changes at least one row.
+    ///
+    /// This exercises the safe [`borrowable_list_buffers`] helper, which carries all the offset and
+    /// value-count math. The `parquet_df_next_list_batch` extern wrapper adds only what the helper
+    /// cannot: cursor/handle resolution, EOF and batch-size bounds, the borrow release/reserve
+    /// lifecycle, and copying these fields into the nine `*mut i64` out-parameters - none of which
+    /// is covered here.
+    #[test]
+    fn list_buffers_export_offsets_that_carve_each_row_back_exactly() {
+        use arrow::datatypes::Int32Type;
+
+        // Widths 2, 0 (empty), 3, 1 -> offsets [0, 2, 2, 5, 6], child [10, 11, 20, 21, 22, 30].
+        let rows: Vec<Option<Vec<Option<i32>>>> = vec![
+            Some(vec![Some(10), Some(11)]),
+            Some(vec![]),
+            Some(vec![Some(20), Some(21), Some(22)]),
+            Some(vec![Some(30)]),
+        ];
+        let list = ListArray::from_iter_primitive::<Int32Type, _, _>(rows.clone());
+        let child_len = list.values().len();
+
+        let borrow = borrowable_list_buffers(&list).expect("an i32 ListArray must be borrowable");
+        assert_eq!(
+            borrow.value_count, child_len,
+            "value_count must bound the child buffer Java may read to child.len()"
+        );
+        // The child is Int32, so it borrows as the Int wire kind - the same flat-value contract the
+        // single-valued path already exports.
+        assert_eq!(borrow.values.kind, BorrowKind::Int as i64);
+
+        // Reconstruct each row exactly as Java does, reading offsets[r]..offsets[r + 1] one row at a
+        // time (never materialising the whole offsets slice, so an off-by-one offsets pointer is
+        // caught by the first wrong row rather than an out-of-bounds slice read) and carving that
+        // range out of the value buffer.
+        let read_offset = |i: usize| unsafe { *(borrow.offsets_addr as *const i32).add(i) };
+        let read_value =
+            |i: i32| unsafe { *(borrow.values.values_addr as *const i32).add(i as usize) };
+        for (r, expected) in rows.iter().enumerate() {
+            let start = read_offset(r);
+            let end = read_offset(r + 1);
+            let got: Vec<i32> = (start..end).map(read_value).collect();
+            let expected: Vec<i32> =
+                expected.as_ref().unwrap().iter().map(|v| v.unwrap()).collect();
+            assert_eq!(got, expected, "row {r} must reconstruct from its offset range exactly");
+        }
+        assert_eq!(
+            read_offset(rows.len()) as usize,
+            child_len,
+            "the final offset must equal the child length"
+        );
+    }
+
+    /// A SLICED list must still reconstruct, because the offsets are absolute indices into the whole
+    /// (unsliced) child and `borrowable_buffers` addresses child value 0. Dropping the first row via
+    /// `.slice` and reconstructing the survivors proves the window is carried entirely by the
+    /// exported offsets - the case most likely to regress silently if a future refactor were to
+    /// re-slice the child instead of leaving the window in the offsets.
+    #[test]
+    fn a_sliced_list_still_reconstructs_from_absolute_offsets() {
+        use arrow::datatypes::Int32Type;
+
+        let rows: Vec<Option<Vec<Option<i32>>>> = vec![
+            Some(vec![Some(10), Some(11)]),
+            Some(vec![]),
+            Some(vec![Some(20), Some(21), Some(22)]),
+            Some(vec![Some(30)]),
+        ];
+        let full = ListArray::from_iter_primitive::<Int32Type, _, _>(rows.clone());
+        // Drop row 0; the survivors are the empty row, [20, 21, 22] and [30].
+        let sliced = full.slice(1, 3);
+        // The child stays unsliced, so value_count is the whole child, not the sliced window.
+        let child_len = full.values().len();
+
+        let borrow =
+            borrowable_list_buffers(&sliced).expect("a sliced i32 ListArray must be borrowable");
+        assert_eq!(
+            borrow.value_count, child_len,
+            "value_count follows the unsliced child, not the sliced row window"
+        );
+
+        let read_offset = |i: usize| unsafe { *(borrow.offsets_addr as *const i32).add(i) };
+        let read_value =
+            |i: i32| unsafe { *(borrow.values.values_addr as *const i32).add(i as usize) };
+        // The rebased offsets stay absolute into the whole child: row 1's start (2), not 0.
+        assert_eq!(
+            read_offset(0),
+            2,
+            "sliced offsets must remain absolute indices into the whole child"
+        );
+        for (r, expected) in rows[1..].iter().enumerate() {
+            let start = read_offset(r);
+            let end = read_offset(r + 1);
+            let got: Vec<i32> = (start..end).map(read_value).collect();
+            let expected: Vec<i32> =
+                expected.as_ref().unwrap().iter().map(|v| v.unwrap()).collect();
+            assert_eq!(got, expected, "surviving row {r} must reconstruct exactly");
+        }
+    }
+
+    /// A `LargeListArray` (i64 offsets) is not the i32-offset `ListArray` the export downcasts to, so
+    /// the helper returns `None` and the caller (`parquet_df_next_list_batch`) turns that into its
+    /// "unsupported array type" error rather than misreading 64-bit offsets as 32-bit. Mirrors how
+    /// `a_type_with_no_borrow_kind_is_not_borrowable` asserts a rejected scalar type on the sibling
+    /// [`borrowable_buffers`].
+    #[test]
+    fn a_large_list_array_is_not_borrowable_as_a_list() {
+        use arrow::array::LargeListArray;
+        use arrow::datatypes::Int32Type;
+
+        let large = LargeListArray::from_iter_primitive::<Int32Type, _, _>(vec![
+            Some(vec![Some(1), Some(2)]),
+            Some(vec![Some(3)]),
+        ]);
+        assert!(
+            borrowable_list_buffers(&large).is_none(),
+            "a LargeListArray's i64 offsets must be rejected, not misread as an i32 ListArray"
+        );
+    }
 }
 
 /// Tests driving the `extern "C"` entry points: handle registry, status codes, and `borrowed_batch`,
@@ -1743,6 +2044,20 @@ mod ffm_tests {
             value_kind,
             value_bit_offset,
         }
+    }
+
+    /// The physical-shape probe reports scalar for a scalar fixture, straight through the FFI
+    /// boundary: handle -> cursor -> reader.is_repeated -> return code. The repeated side is covered
+    /// by the `forward_reader` unit tests and the Java list-file integration test. Falsifiable:
+    /// returning `1` unconditionally from `parquet_df_is_repeated`, or routing on the mapping rather
+    /// than the file schema, flips this.
+    #[test]
+    fn is_repeated_reports_scalar_for_a_scalar_fixture() {
+        let file = fixture_file();
+        let handle = open_fixture(&file);
+        let rc = unsafe { parquet_df_is_repeated(handle) };
+        assert_eq!(rc, 0, "a scalar fixture must probe as not-repeated (rc={rc})");
+        unsafe { parquet_df_close_iter(handle) };
     }
 
     #[test]
@@ -2020,14 +2335,20 @@ mod ffm_tests {
         let metadata = unsafe {
             let mut num_rows = -1i64;
             let mut format_version = -1i64;
+            let mut values_sorted = -2i64; // sentinel distinct from the -1 = absent the call writes
             let rc = parquet_df_file_metadata(
                 path.as_ptr(),
                 path.len() as i64,
                 store_ptr,
                 &mut num_rows,
                 &mut format_version,
+                &mut values_sorted,
             );
             assert_eq!(rc, RC_OK, "{}", error_message(rc));
+            assert_eq!(
+                values_sorted, VALUES_SORTED_ABSENT,
+                "an Arrow-written fixture stamps no values_sorted marker, so it must read as absent"
+            );
             (num_rows, format_version)
         };
         assert_eq!(
