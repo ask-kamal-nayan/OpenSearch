@@ -45,6 +45,9 @@ pub struct FileCursor {
     pub sort_col_indices: Vec<usize>,
     pub sort_col_types: Vec<ArrowDataType>,
     pub nulls_first: Vec<bool>,
+    /// The `opensearch.values_sorted` footer marker read from this input file's metadata.
+    /// True iff this input claims each document's multi-value list was written ascending.
+    values_sorted: bool,
     current_sort_batch_bytes: usize,
     current_data_batch_bytes: usize,
 }
@@ -66,6 +69,10 @@ impl FileCursor {
         let writer_generation = crate::writer_properties_builder::read_writer_generation(
             builder.metadata().file_metadata(),
             file_id,
+        );
+        // Read the values_sorted marker from the SAME footer already loaded above (no second open).
+        let values_sorted = crate::writer_properties_builder::read_values_sorted(
+            builder.metadata().file_metadata(),
         );
         let total_row_count = builder.metadata().file_metadata().num_rows() as usize;
         let parquet_schema_descr = builder.parquet_schema().clone();
@@ -207,6 +214,7 @@ impl FileCursor {
             sort_col_indices,
             sort_col_types,
             nulls_first: nulls_first.to_vec(),
+            values_sorted,
             current_sort_batch_bytes: 0,
             current_data_batch_bytes: 0,
         };
@@ -224,6 +232,12 @@ impl FileCursor {
             writer_generation,
             total_row_count,
         ))
+    }
+
+    /// The `opensearch.values_sorted` marker read from this input file's footer. See
+    /// [`crate::writer_properties_builder::read_values_sorted`].
+    pub fn values_sorted(&self) -> bool {
+        self.values_sorted
     }
 
     fn start_sort_prefetch(&mut self) {

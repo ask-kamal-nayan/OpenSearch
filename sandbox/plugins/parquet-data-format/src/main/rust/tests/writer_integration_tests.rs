@@ -63,6 +63,7 @@ fn test_concurrent_writer_creation() {
                 vec![],
                 vec![],
                 0,
+                false,
             )
             .is_ok()
             {
@@ -200,6 +201,7 @@ fn test_concurrent_complete_writer_lifecycle() {
                 vec![],
                 vec![],
                 0,
+                false,
             )
             .is_ok()
             {
@@ -245,6 +247,7 @@ fn test_ipc_staging_sorted_writer_integration() {
         vec![false],
         vec![false],
         0,
+        false,
     )
     .unwrap();
 
@@ -293,6 +296,7 @@ fn test_ipc_staging_concurrent_sorted_lifecycle() {
                 vec![false],
                 vec![false],
                 0,
+                false,
             )
             .is_ok()
             {
@@ -361,6 +365,7 @@ fn test_ipc_and_parquet_mixed_concurrent_lifecycle() {
                 reverse,
                 nulls,
                 0,
+                false,
             )
             .is_ok()
             {
@@ -679,6 +684,7 @@ fn create_writer_and_assert_success_for_index(
         vec![],
         vec![],
         0,
+        false,
     )
     .expect("create_writer failed");
     (schema, schema_ptr)
@@ -706,6 +712,7 @@ fn create_three_col_writer(
         vec![],
         vec![],
         0,
+        false,
     )
     .expect("create_writer failed");
     (schema, schema_ptr)

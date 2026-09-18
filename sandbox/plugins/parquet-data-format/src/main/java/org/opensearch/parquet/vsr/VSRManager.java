@@ -27,6 +27,7 @@ import org.opensearch.index.engine.dataformat.RowIdMapping;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.nativebridge.spi.ArrowExport;
 import org.opensearch.parquet.ParquetDataFormatPlugin;
+import org.opensearch.parquet.ParquetSettings;
 import org.opensearch.parquet.bridge.NativeParquetWriter;
 import org.opensearch.parquet.bridge.ParquetFileMetadata;
 import org.opensearch.parquet.bridge.ParquetSortConfig;
@@ -78,6 +79,8 @@ public class VSRManager implements AutoCloseable {
     private final String vsrRotationThread;
     private final long writerGeneration;
     private final ParquetShardStatsTracker stats;
+    /** Cached once per writer: when true, each document's multi-value list is sorted ascending on ingest. */
+    private final boolean multiValueSortEnabled;
     private volatile Future<?> pendingWrite;
     private final NativeParquetWriter writer;
     private final int ROTATION_TIMEOUT = 120;
@@ -180,6 +183,7 @@ public class VSRManager implements AutoCloseable {
         this.indexSettings = indexSettings;
         this.writerGeneration = writerGeneration;
         this.stats = stats;
+        this.multiValueSortEnabled = ParquetSettings.MULTI_VALUE_SORT_ENABLED.get(indexSettings.getSettings());
         this.vsrPool = new VSRPool("pool-" + fileName, schema, bufferPool, maxRowsPerVSR);
         this.threadPool = threadPool;
         this.vsrRotationThread = runAsync ? ParquetDataFormatPlugin.PARQUET_THREAD_POOL_NAME : ThreadPool.Names.SAME;
@@ -250,7 +254,7 @@ public class VSRManager implements AutoCloseable {
                             + "] — schema reconciliation must run via updateMappingVersion before addDocument"
                     );
                 }
-                parquetField.createField(fieldType, activeVSR, pair.getValue());
+                parquetField.createField(fieldType, activeVSR, pair.getValue(), multiValueSortEnabled);
                 writtenFields++;
             }
             BigIntVector rowIdVector = (BigIntVector) activeVSR.getVector(DocumentInput.ROW_ID_FIELD);
@@ -524,7 +528,7 @@ public class VSRManager implements AutoCloseable {
             String indexName = indexSettings.getIndex().getName();
             ParquetSortConfig sortConfig = new ParquetSortConfig(indexSettings);
             try (ArrowSchema schema = vsr.exportSchema()) {
-                writer.initialize(indexName, schema.memoryAddress(), sortConfig, writerGeneration);
+                writer.initialize(indexName, schema.memoryAddress(), sortConfig, writerGeneration, multiValueSortEnabled);
             }
         }
     }

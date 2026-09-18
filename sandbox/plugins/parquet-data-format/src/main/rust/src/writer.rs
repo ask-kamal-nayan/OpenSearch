@@ -427,10 +427,11 @@ impl NativeParquetWriter {
         reverse_sorts: Vec<bool>,
         nulls_first: Vec<bool>,
         writer_generation: i64,
+        multi_value_sort_enabled: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         log_debug!(
-            "create_writer called for file: {}, index: {}, schema_address: {}, sort_columns: {:?}, reverse_sorts: {:?}, nulls_first: {:?}, writer_generation: {}",
-            filename, index_name, schema_address, sort_columns, reverse_sorts, nulls_first, writer_generation
+            "create_writer called for file: {}, index: {}, schema_address: {}, sort_columns: {:?}, reverse_sorts: {:?}, nulls_first: {:?}, writer_generation: {}, multi_value_sort_enabled: {}",
+            filename, index_name, schema_address, sort_columns, reverse_sorts, nulls_first, writer_generation, multi_value_sort_enabled
         );
 
         if (schema_address as *mut u8).is_null() {
@@ -468,6 +469,7 @@ impl NativeParquetWriter {
         settings.sort_columns = sort_columns;
         settings.reverse_sorts = reverse_sorts;
         settings.nulls_first = nulls_first;
+        settings.multi_value_sort_enabled = multi_value_sort_enabled;
 
         SETTINGS_STORE.insert(index_name.clone(), settings.clone());
 
@@ -497,6 +499,7 @@ impl NativeParquetWriter {
             let props = WriterPropertiesBuilder::build_with_generation(
                 &settings,
                 Some(writer_generation),
+                settings.multi_value_sort_enabled,
                 &schema,
             )
             .map_err(|e| format!("Invalid encoding/compression config: {}", e))?;
@@ -755,6 +758,7 @@ impl NativeParquetWriter {
             let props = WriterPropertiesBuilder::build_with_generation(
                 &config,
                 Some(writer_generation),
+                config.multi_value_sort_enabled,
                 &schema,
             )
             .map_err(|e| format!("Invalid encoding/compression config: {}", e))?;
@@ -932,7 +936,7 @@ impl NativeParquetWriter {
             .map(|r| r.clone())
             .unwrap_or_default();
         let props =
-            WriterPropertiesBuilder::build_with_generation(&config, writer_generation, &schema)
+            WriterPropertiesBuilder::build_with_generation(&config, writer_generation, config.multi_value_sort_enabled, &schema)
                 .map_err(|e| format!("Invalid encoding/compression config: {}", e))?;
         let file = File::create(output_filename)?;
         let (crc_file, crc_handle) = CrcWriter::new(file);
