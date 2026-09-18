@@ -130,7 +130,12 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
             if (existing.fieldInfo(name) != null) {
                 continue;
             }
-            DocValuesType dvType = FieldTypeMapping.forType(mft.typeName()).singleValued();
+            // Pick the DV type from the mapping's LIST state: a field whose MappedFieldType reports
+            // isMultiValued() (multiValueState == LIST) is served as SORTED_NUMERIC, everything else
+            // as its single-valued NUMERIC form. isMultiValued() is the LIST state, not the durable
+            // isMultiValueSupported() capability, so a scalar field is never over-declared SORTED_NUMERIC.
+            FieldTypeMapping.Mapping m = FieldTypeMapping.forType(mft.typeName());
+            DocValuesType dvType = mft.isMultiValued() ? m.multiValued() : m.singleValued();
             FieldInfo synthetic = newDocValuesFieldInfo(name, ++maxNumber, dvType);
             parquetFields.put(name, synthetic);
             combined.add(synthetic);
@@ -218,7 +223,9 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
     public NumericDocValues getNumericDocValues(String field) throws IOException {
         FieldInfo fi = parquetFieldInfo(field);
         if (fi != null) {
-            // Every synthesized Parquet field is single-valued NUMERIC (FieldTypeMapping.singleValued()).
+            // A synthesized Parquet field reaches getNumeric only when W1 stamped it single-valued
+            // NUMERIC; genuinely multi-valued fields are stamped SORTED_NUMERIC and served through
+            // getSortedNumericDocValues below.
             assert assertRowIdsAreIdentity() : "non-identity __row_id__ segment reached the Parquet doc-values read path";
             return producer().getNumeric(fi);
         }
@@ -230,8 +237,9 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
         FieldInfo fi = parquetFieldInfo(field);
         if (fi != null) {
             // OpenSearch numeric value sources request SORTED_NUMERIC even for single-valued fields,
-            // then call DocValues.unwrapSingleton(...). The producer serves this as a singleton over
-            // the single-valued numeric iterator (docId == Parquet row, asserted above).
+            // then call DocValues.unwrapSingleton(...). The producer serves a single-valued field as a
+            // singleton over the numeric iterator, and a genuinely multi-valued field (SORTED_NUMERIC)
+            // as the multi-valued iterator (docId == Parquet row, asserted above).
             assert assertRowIdsAreIdentity() : "non-identity __row_id__ segment reached the Parquet doc-values read path";
             return producer().getSortedNumeric(fi);
         }

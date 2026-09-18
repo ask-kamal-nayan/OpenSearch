@@ -80,6 +80,37 @@ public class FieldTypeMappingTests extends OpenSearchTestCase {
     }
 
     /**
+     * W1 selects the DV type as {@code mft.isMultiValued() ? multiValued() : singleValued()}, so
+     * every supported type must offer two DISTINCT arms - single-valued NUMERIC and multi-valued
+     * SORTED_NUMERIC - or the multi-valued branch would be indistinguishable from the single-valued
+     * one. This pins the SORTED_NUMERIC arm the multi-valued selection returns; reverting the mapping
+     * to a single arm collapses the distinction W1 relies on.
+     */
+    public void testMultiValuedSelectionResolvesToSortedNumericDistinctFromSingleValued() {
+        for (String type : new String[] {
+            "byte",
+            "short",
+            "integer",
+            "long",
+            "float",
+            "double",
+            "date",
+            "date_nanos",
+            "boolean",
+            "unsigned_long",
+            "scaled_float",
+            "half_float" }) {
+            FieldTypeMapping.Mapping mapping = FieldTypeMapping.forType(type);
+            assertEquals(type + " multi-valued arm", DocValuesType.SORTED_NUMERIC, mapping.multiValued());
+            assertNotSame(
+                type + " must expose distinct single/multi arms for W1 to select between",
+                mapping.singleValued(),
+                mapping.multiValued()
+            );
+        }
+    }
+
+    /**
      * {@code validate} is the gate {@code ParquetDocValuesProducer.getNumeric}/{@code getSortedNumeric}
      * actually call, once the field's {@code MappedFieldType} is known, so it is what keeps an
      * unsupported type from ever reaching the native cursor.

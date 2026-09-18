@@ -21,9 +21,12 @@ import org.apache.lucene.index.SegmentReadState;
 import org.apache.lucene.index.SortedDocValues;
 import org.apache.lucene.index.SortedNumericDocValues;
 import org.apache.lucene.index.SortedSetDocValues;
+import org.opensearch.analytics.backend.jni.NativeHandle;
 import org.opensearch.be.datafusion.docvalues.bridge.ParquetCodecBridge;
 import org.opensearch.be.datafusion.docvalues.bridge.ParquetColumnReader;
+import org.opensearch.be.datafusion.docvalues.bridge.ParquetListColumnReader;
 import org.opensearch.be.datafusion.docvalues.iter.ParquetNumericDocValues;
+import org.opensearch.be.datafusion.docvalues.iter.ParquetSortedNumericDocValues;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.mapper.MapperService;
@@ -34,6 +37,8 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Read-only {@link DocValuesProducer} that serves single-valued numeric doc values from a Parquet
@@ -83,9 +88,23 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     private final Settings indexSettings;
     private final int maxDoc;
     private final long parquetRowCount;
+    /**
+     * Whether the writer proved each row's values already ascending, memoized once per segment from
+     * the {@code opensearch.values_sorted} footer marker. Only a present-and-true marker sets this;
+     * an absent or false marker leaves it false so the multi-valued iterator sorts on read (the
+     * default-safe rule). Never re-read per document.
+     */
+    private final boolean valuesSorted;
 
-    private final List<ParquetColumnReader> dedicatedReaders = Collections.synchronizedList(new ArrayList<>());
+    private final List<NativeHandle> dedicatedReaders = Collections.synchronizedList(new ArrayList<>());
     private volatile boolean closed;
+
+    /**
+     * Memoized per-column physical shape (repeated vs scalar) read from the file's own schema. A
+     * segment's shape is fixed once written, so the native probe runs at most once per column. Keyed
+     * by field name, like the file itself. See {@link #isRepeated(FieldInfo)}.
+     */
+    private final Map<String, Boolean> repeatedColumns = new ConcurrentHashMap<>();
 
     /**
      * @param mapperService resolves OpenSearch mapping types for DV-type validation (may be
@@ -115,6 +134,10 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
         ParquetCodecBridge.FileMetadata metadata = ParquetCodecBridge.fileMetadata(parquetFile.toString(), storePointer);
         checkFormatVersion(metadata.opensearchFormatVersion(), parquetFile);
         this.parquetRowCount = metadata.numRows();
+        // Read the values-sorted marker once here, at segment open, and memoize it: the multi-valued
+        // iterator needs it only to decide whether it may skip its read-side sort, never per document.
+        // Only a present-and-true marker grants that permission; absent/false keeps the reader sorting.
+        this.valuesSorted = metadata.valuesSorted() == ParquetCodecBridge.VALUES_SORTED_TRUE;
         if (parquetRowCount != maxDoc) {
             throw new IllegalStateException(
                 String.format(
@@ -140,11 +163,63 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     public SortedNumericDocValues getSortedNumeric(FieldInfo field) throws IOException {
         ensureOpen();
         validate(field, DocValuesType.SORTED_NUMERIC);
-        // Ingest rejects multi-valued numerics (ParquetDocumentInput), so every numeric column on disk
-        // is single-valued and this singleton wrap is exact; OpenSearch value sources recover the inner
-        // iterator via DocValues.unwrapSingleton.
-        // TODO(multi-value): needs a repeated read path once the write path emits arrays.
+        if (isMultiValued(field) && isRepeated(field)) {
+            // Two signals, both required. The declaration (W1 stamped SORTED_NUMERIC) says the
+            // mapping considers the field multi-valued; the physical probe says this segment's
+            // column is actually a LIST on disk. They can legitimately disagree after a
+            // scalar-to-LIST promotion: the mapping then reports multi-valued for every segment,
+            // while segments written earlier are still physically scalar. Routing such an older
+            // scalar segment to the list reader would fail the native list downcast, so it must fall
+            // through to the singleton path below instead - the field stays consistently declared,
+            // so queries and aggregations bind the same way across segments of differing shape.
+            // Genuinely multi-valued (W1 stamped SORTED_NUMERIC on the synthetic FieldInfo): serve the
+            // per-row value list. The iterator sorts each row ascending unless valuesSorted proves the
+            // writer already did, so min/max are correct regardless of the marker.
+            return new ParquetSortedNumericDocValues(dedicatedListReaderFor(field), maxDoc, valuesSorted);
+        }
+        // Single-valued numeric: every such column on disk holds one value per row, so this singleton
+        // wrap is exact; OpenSearch value sources recover the inner iterator via DocValues.unwrapSingleton.
+        // Also the disagreement case above (declared multi-valued, physically scalar): the scalar
+        // reader serves the older segment correctly through the same SortedNumeric API.
         return DocValues.singleton(new ParquetNumericDocValues(dedicatedReaderFor(field), maxDoc));
+    }
+
+    /**
+     * Whether a field is served by the multi-valued iterator: true exactly when its DV type is
+     * {@code SORTED_NUMERIC}, which {@code ParquetDocValuesLeafReader} (W1) stamps only on fields the
+     * mapping reports as multi-valued. A single-valued field carries {@code NUMERIC} and takes the
+     * singleton path.
+     */
+    static boolean isMultiValued(FieldInfo field) {
+        return field.getDocValuesType() == DocValuesType.SORTED_NUMERIC;
+    }
+
+    /**
+     * Whether {@code field}'s column is physically repeated (a Parquet LIST) in this segment, read
+     * from the file's own schema rather than the mapping.
+     *
+     * <p>The mapping and the file legitimately disagree exactly where it matters: once a numeric is
+     * promoted from scalar to LIST ({@code MultiValueState.AUTO -> LIST}) the mapping declares it
+     * multi-valued for every segment, while segments written before the promotion are still scalar
+     * on disk. Routing on the declaration alone would hand those older scalar columns to the list
+     * reader and fail the native list downcast, so {@link #getSortedNumeric} gates the list path on
+     * this on-disk signal as well.
+     *
+     * <p>Opens a short-lived probe cursor whose only job is to read the shape recorded at open - it
+     * never advances the cursor - and memoizes the answer in {@link #repeatedColumns}, since a
+     * segment's physical shape is fixed once written.
+     */
+    boolean isRepeated(FieldInfo field) throws IOException {
+        Boolean cached = repeatedColumns.get(field.getName());
+        if (cached != null) {
+            return cached;
+        }
+        boolean repeated;
+        try (ParquetColumnReader probe = ParquetColumnReader.open(parquetFile, field.getName(), indexSettings, storePointer)) {
+            repeated = probe.isPhysicallyRepeated();
+        }
+        repeatedColumns.put(field.getName(), repeated);
+        return repeated;
     }
 
     @Override
@@ -199,7 +274,7 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
         }
         closed = true;
         synchronized (dedicatedReaders) {
-            for (ParquetColumnReader reader : dedicatedReaders) {
+            for (NativeHandle reader : dedicatedReaders) {
                 try {
                     // A teardown failure is logged by the reader itself; this only guards the loop
                     // so one bad reader cannot leave the rest open.
@@ -279,8 +354,23 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     /** Opens a dedicated forward-only cursor for one iterator, registered for close with this producer. */
     private ParquetColumnReader dedicatedReaderFor(FieldInfo field) throws IOException {
         ParquetColumnReader reader = ParquetColumnReader.open(parquetFile, field.getName(), indexSettings, storePointer);
-        // Register under the same lock close() clears the list under: an open that races a
-        // concurrent close would otherwise add to an already-drained list and leak the cursor.
+        register(reader);
+        return reader;
+    }
+
+    /** Opens a dedicated forward-only list cursor for one multi-valued iterator, registered for close. */
+    private ParquetListColumnReader dedicatedListReaderFor(FieldInfo field) throws IOException {
+        ParquetListColumnReader reader = ParquetListColumnReader.open(parquetFile, field.getName(), indexSettings, storePointer);
+        register(reader);
+        return reader;
+    }
+
+    /**
+     * Registers a freshly opened cursor under the same lock {@link #close()} clears the list under:
+     * an open that races a concurrent close would otherwise add to an already-drained list and leak
+     * the cursor.
+     */
+    private void register(NativeHandle reader) {
         synchronized (dedicatedReaders) {
             if (closed) {
                 reader.close();
@@ -288,7 +378,6 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
             }
             dedicatedReaders.add(reader);
         }
-        return reader;
     }
 
     private UnsupportedOperationException unsupported(String kind, FieldInfo field) {
