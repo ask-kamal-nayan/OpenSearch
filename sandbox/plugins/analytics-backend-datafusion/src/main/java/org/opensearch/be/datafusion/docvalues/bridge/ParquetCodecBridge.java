@@ -111,7 +111,8 @@ public final class ParquetCodecBridge {
                 ValueLayout.JAVA_LONG,  // file_len
                 ValueLayout.JAVA_LONG,  // store_ptr
                 ValueLayout.ADDRESS,    // out_num_rows
-                ValueLayout.ADDRESS     // out_format_version
+                ValueLayout.ADDRESS,    // out_format_version
+                ValueLayout.ADDRESS     // out_values_sorted
             )
         );
         // Matches the Rust `parquet_df_is_repeated(handle: i64) -> i64` exactly: one JAVA_LONG
@@ -131,8 +132,13 @@ public final class ParquetCodecBridge {
      *                                {@code major*1_000_000 + minor*1_000 + patch}, or
      *                                {@link #FORMAT_VERSION_UNKNOWN}
      *                                if the file carries no parseable stamp
+     * @param valuesSorted            {@code opensearch.values_sorted} footer marker as a boolean:
+     *                                {@code true} only when the writer proved each row's values
+     *                                already ascending. Absent or any non-{@code "true"} value reads
+     *                                back {@code false} (fail closed), so it is trusted only as
+     *                                permission to skip the read-side per-row sort
      */
-    public record FileMetadata(long numRows, long opensearchFormatVersion) {
+    public record FileMetadata(long numRows, long opensearchFormatVersion, boolean valuesSorted) {
     }
 
     /**
@@ -150,8 +156,15 @@ public final class ParquetCodecBridge {
             var f = call.str(file);
             var numRowsOut = call.longOut();
             var formatVersionOut = call.longOut();
-            call.invokeIO(FILE_METADATA, f.segment(), f.len(), storePtr, numRowsOut, formatVersionOut);
-            return new FileMetadata(numRowsOut.get(ValueLayout.JAVA_LONG, 0), formatVersionOut.get(ValueLayout.JAVA_LONG, 0));
+            var valuesSortedOut = call.longOut();
+            call.invokeIO(FILE_METADATA, f.segment(), f.len(), storePtr, numRowsOut, formatVersionOut, valuesSortedOut);
+            return new FileMetadata(
+                numRowsOut.get(ValueLayout.JAVA_LONG, 0),
+                formatVersionOut.get(ValueLayout.JAVA_LONG, 0),
+                // The native side writes a 0/1 boolean through an i64 out-param (a stable FFI wire);
+                // convert it to a Java boolean at the boundary.
+                valuesSortedOut.get(ValueLayout.JAVA_LONG, 0) != 0
+            );
         }
     }
 

@@ -68,6 +68,11 @@ const RC_EOF: i64 = 2;
 /// `ParquetColumnReader.LOCAL_STORE` on the Java side.
 const LOCAL_STORE: i64 = 0;
 
+/// Footer key-value marker recording whether the writer already sorted each row's values ascending.
+/// Written by the ingest-time sort added in a later commit; read here so the reader can skip its own
+/// per-row sort when - and only when - the writer provably did it.
+const VALUES_SORTED_KEY: &str = "opensearch.values_sorted";
+
 static NEXT_HANDLE: AtomicI64 = AtomicI64::new(1); // 0 is never a live handle
 static CURSORS: Lazy<DashMap<i64, Arc<Mutex<DocValuesCursor>>>> = Lazy::new(DashMap::new);
 
@@ -674,8 +679,8 @@ pub unsafe extern "C" fn parquet_df_open_iter(
 /// `store_ptr`, and on the local path still costs no extra IO once a cursor has been opened, because
 /// both share the global footer cache.
 ///
-/// Writes `out_num_rows` and `out_format_version` only on success; a caller that gets a negative
-/// return must not read them.
+/// Writes `out_num_rows`, `out_format_version` and `out_values_sorted` only on success; a caller
+/// that gets a negative return must not read them.
 #[ffm_safe]
 #[no_mangle]
 pub unsafe extern "C" fn parquet_df_file_metadata(
@@ -685,10 +690,15 @@ pub unsafe extern "C" fn parquet_df_file_metadata(
     store_ptr: i64,
     out_num_rows: *mut i64,
     out_format_version: *mut i64,
+    // `opensearch.values_sorted` marker as a boolean, written through this i64: 1 when the writer
+    // proved each row's values already ascending, 0 otherwise. The i64 width is deliberate - a
+    // cross-language `bool` ABI is a footgun - but the value set is only {0, 1}. See the encoding
+    // site below.
+    out_values_sorted: *mut i64,
 ) -> i64 {
     static FN: &str = "parquet_df_file_metadata";
     let filename = str_from_raw(file_ptr, file_len).map_err(|e| format!("{FN} file: {e}"))?;
-    if out_num_rows.is_null() || out_format_version.is_null() {
+    if out_num_rows.is_null() || out_format_version.is_null() || out_values_sorted.is_null() {
         return Err(format!("{FN}: null out-parameter"));
     }
     let runtime = io_runtime().map_err(|e| format!("{FN}: {e}"))?;
@@ -726,8 +736,20 @@ pub unsafe extern "C" fn parquet_df_file_metadata(
             })
             .unwrap_or_default(),
     );
+    // Second footer key-value scan, modelled on the FORMAT_VERSION_KEY read above. Boolean, not
+    // tri-state: absent and any non-"true" value deliberately collapse to `false` (fail closed).
+    // Only the literal "true" is trusted as permission to skip the read-side per-row sort;
+    // everything else - a missing marker (every pre-feature file, and every file written with the
+    // ingest sort off) or an unrecognised value - reads back `false`, so the reader defaults to
+    // sorting and can never skip a sort it should have done.
+    let values_sorted = file_metadata
+        .key_value_metadata()
+        .and_then(|kvs| kvs.iter().find(|kv| kv.key == VALUES_SORTED_KEY))
+        .map_or(false, |kv| kv.value.as_deref() == Some("true"));
     *out_num_rows = file_metadata.num_rows();
     *out_format_version = format_version;
+    // Widened to i64 for a stable FFI wire; the value set is only {0, 1}.
+    *out_values_sorted = values_sorted as i64;
     Ok(RC_OK)
 }
 
@@ -2495,14 +2517,20 @@ mod ffm_tests {
         let metadata = unsafe {
             let mut num_rows = -1i64;
             let mut format_version = -1i64;
+            let mut values_sorted = -2i64; // sentinel distinct from the 0/1 the call writes
             let rc = parquet_df_file_metadata(
                 path.as_ptr(),
                 path.len() as i64,
                 store_ptr,
                 &mut num_rows,
                 &mut format_version,
+                &mut values_sorted,
             );
             assert_eq!(rc, RC_OK, "{}", error_message(rc));
+            assert_eq!(
+                values_sorted, 0,
+                "an Arrow-written fixture stamps no values_sorted marker, so it must read back as 0 (fail closed)"
+            );
             (num_rows, format_version)
         };
         assert_eq!(

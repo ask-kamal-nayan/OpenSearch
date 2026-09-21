@@ -132,6 +132,9 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
             if (existing.fieldInfo(name) != null) {
                 continue;
             }
+            // Base #23055 maps every supported type to SORTED_NUMERIC uniformly; a single-valued
+            // column is recovered by callers via DocValues.unwrapSingleton, and the physical LIST
+            // shape is resolved later by the producer's on-disk probe, not from the mapping here.
             DocValuesType dvType = FieldTypeMapping.forType(mft.typeName());
             FieldInfo synthetic = newDocValuesFieldInfo(name, ++maxNumber, dvType);
             parquetFields.put(name, synthetic);
@@ -234,9 +237,11 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
         FieldInfo fi = parquetFieldInfo(field);
         if (fi != null) {
             // OpenSearch numeric value sources request SORTED_NUMERIC even for single-valued fields,
-            // then call DocValues.unwrapSingleton(...). The producer serves this as a singleton over
-            // the single-valued numeric iterator (docId == Parquet row, asserted above). The cursor is
-            // recorded on this request's registry and closed when the request ends.
+            // OpenSearch numeric value sources request SORTED_NUMERIC even for single-valued fields,
+            // then call DocValues.unwrapSingleton(...). The producer serves a physically scalar column
+            // as a singleton over the numeric iterator and a physically repeated (LIST) column as the
+            // multi-valued iterator (docId == Parquet row, asserted above). The cursor is recorded on
+            // this request's registry and closed when the request ends.
             assert assertRowIdsAreIdentity() : "non-identity __row_id__ segment reached the Parquet doc-values read path";
             return producer.getSortedNumeric(fi, cursors);
         }
