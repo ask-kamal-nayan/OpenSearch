@@ -43,6 +43,11 @@ pub struct NativeSettings {
     pub merge_rayon_threads: Option<usize>,
     pub merge_io_threads: Option<usize>,
     pub merge_deferred_column_threshold: Option<usize>,
+    /// Whether ingest sorted each document's multi-value list ascending
+    /// (`index.parquet.multi_value_sort_enabled`). Drives the `opensearch.values_sorted` footer
+    /// marker: stamped iff this per-row list sort actually ran for the file. Distinct from
+    /// `sort_columns`, which reorders whole rows and says nothing about within-row value order.
+    pub multi_value_sort_enabled: bool,
 }
 
 impl NativeSettings {

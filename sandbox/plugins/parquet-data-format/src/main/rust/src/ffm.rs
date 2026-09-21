@@ -116,6 +116,10 @@ pub unsafe extern "C" fn parquet_create_writer(
     max_sort_mode_vals: *const i64,
     max_sort_mode_count: i64,
     writer_generation: i64,
+    // Whether ingest sorts each document's multi-value list ascending. Passed as i64 (0/1) to match
+    // the existing bool-as-i64 FFI convention (see reverse_vals/nulls_first_vals). Drives the
+    // opensearch.values_sorted footer marker; NOT the same as sort_columns (whole-row ordering).
+    multi_value_sort_enabled: i64,
 ) -> i64 {
     let filename = str_from_raw(file_ptr, file_len)
         .map_err(|e| format!("parquet_create_writer file: {}", e))?
@@ -138,6 +142,7 @@ pub unsafe extern "C" fn parquet_create_writer(
         nulls_first,
         max_sort_modes,
         writer_generation,
+        multi_value_sort_enabled != 0,
     )
     .map(|_| 0)
     .map_err(|e| e.to_string())

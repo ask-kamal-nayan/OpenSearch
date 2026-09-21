@@ -149,7 +149,7 @@ public class ParquetDocValuesProducerPhysicalShapeTests extends DataFusionBacked
         ArrowSchema schemaExport = ArrowSchema.allocateNew(allocator);
         Data.exportSchema(allocator, schema, null, schemaExport);
         try (ArrowExport export = new ArrowExport(null, schemaExport)) {
-            writer.initialize("test-index", export.getSchemaAddress(), ParquetSortConfig.empty(), 0L);
+            writer.initialize("test-index", export.getSchemaAddress(), ParquetSortConfig.empty(), 0L, false);
         }
         try (VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
             BigIntVector vector = (BigIntVector) root.getVector(COLUMN);
@@ -189,7 +189,7 @@ public class ParquetDocValuesProducerPhysicalShapeTests extends DataFusionBacked
             ArrowSchema schemaExport = ArrowSchema.allocateNew(allocator);
             Data.exportSchema(allocator, schema, null, schemaExport);
             try (ArrowExport export = new ArrowExport(null, schemaExport)) {
-                parquetWriter.initialize("test-index", export.getSchemaAddress(), ParquetSortConfig.empty(), 0L);
+                parquetWriter.initialize("test-index", export.getSchemaAddress(), ParquetSortConfig.empty(), 0L, false);
             }
 
             try (VectorSchemaRoot root = new VectorSchemaRoot(schema.getFields(), List.of(listVector), rows.length)) {

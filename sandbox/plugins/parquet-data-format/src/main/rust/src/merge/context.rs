@@ -62,6 +62,7 @@ impl MergeContext {
         rayon_threads: Option<usize>,
         io_threads: Option<usize>,
         output_writer_generation: i64,
+        output_values_sorted: bool,
         reservation: MemoryReservation,
     ) -> MergeResult<Self> {
         if let Some(parent) = Path::new(output_path).parent() {
@@ -106,9 +107,21 @@ impl MergeContext {
             .map(|r| r.clone())
             .unwrap_or_default();
         let writer_props = Arc::new(
+            // The merge decodes each input to Arrow RecordBatches and re-encodes them via
+            // compute_leaves (see Self::push_batch below, and the row-granular take_slice/pad_batch
+            // in merge::sorted and merge::unsorted), which preserves element order WITHIN each row's
+            // multi-value list;
+            // only WHOLE rows are reordered (sorted path, by sort_columns), never the elements
+            // inside a row's list. Therefore the output is values-sorted iff EVERY input was
+            // values-sorted — the caller ANDs the marker across all inputs (and yields false when
+            // there are no inputs) and passes the result here.
+            // Deriving this from config.multi_value_sort_enabled would be the footgun — that setting
+            // describes the ingest writer, not this merge, and could stamp a dishonest "true" over
+            // inputs that were never sorted.
             WriterPropertiesBuilder::build_with_generation(
                 &config,
                 Some(output_writer_generation),
+                output_values_sorted,
                 &output_schema,
             )
             .map_err(|e| {

@@ -230,7 +230,7 @@ public class ParquetColumnReaderTests extends DataFusionBackedTestCase {
 
         NativeParquetWriter writer = new NativeParquetWriter(file.toString());
         try (ArrowExport schemaExport = exportSchema(schema)) {
-            writer.initialize("test-index", schemaExport.getSchemaAddress(), ParquetSortConfig.empty(), 0L);
+            writer.initialize("test-index", schemaExport.getSchemaAddress(), ParquetSortConfig.empty(), 0L, false);
         }
         try (ArrowExport dataExport = exportData(schema, rowCount, nullEvery)) {
             writer.write(dataExport.getArrayAddress(), dataExport.getSchemaAddress());
@@ -365,7 +365,7 @@ public class ParquetColumnReaderTests extends DataFusionBackedTestCase {
         Schema schema = new Schema(List.of(new Field(COLUMN, fieldType, null)));
         NativeParquetWriter writer = new NativeParquetWriter(file.toString());
         try (ArrowExport schemaExport = exportSchema(schema)) {
-            writer.initialize("test-index", schemaExport.getSchemaAddress(), ParquetSortConfig.empty(), 0L);
+            writer.initialize("test-index", schemaExport.getSchemaAddress(), ParquetSortConfig.empty(), 0L, false);
         }
         try (VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
             BitVector vector = (BitVector) root.getVector(COLUMN);
@@ -439,7 +439,7 @@ public class ParquetColumnReaderTests extends DataFusionBackedTestCase {
         );
         NativeParquetWriter writer = new NativeParquetWriter(file.toString());
         try (ArrowExport schemaExport = exportSchema(schema)) {
-            writer.initialize("test-index", schemaExport.getSchemaAddress(), ParquetSortConfig.empty(), 0L);
+            writer.initialize("test-index", schemaExport.getSchemaAddress(), ParquetSortConfig.empty(), 0L, false);
         }
         try (VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
             Float2Vector vector = (Float2Vector) root.getVector(COLUMN);
@@ -475,7 +475,7 @@ public class ParquetColumnReaderTests extends DataFusionBackedTestCase {
         );
         NativeParquetWriter writer = new NativeParquetWriter(file.toString());
         try (ArrowExport schemaExport = exportSchema(schema)) {
-            writer.initialize("test-index", schemaExport.getSchemaAddress(), ParquetSortConfig.empty(), 0L);
+            writer.initialize("test-index", schemaExport.getSchemaAddress(), ParquetSortConfig.empty(), 0L, false);
         }
         try (VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
             Float8Vector vector = (Float8Vector) root.getVector(COLUMN);
@@ -502,7 +502,7 @@ public class ParquetColumnReaderTests extends DataFusionBackedTestCase {
         );
         NativeParquetWriter writer = new NativeParquetWriter(file.toString());
         try (ArrowExport schemaExport = exportSchema(schema)) {
-            writer.initialize("test-index", schemaExport.getSchemaAddress(), ParquetSortConfig.empty(), 0L);
+            writer.initialize("test-index", schemaExport.getSchemaAddress(), ParquetSortConfig.empty(), 0L, false);
         }
         try (VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
             Float4Vector vector = (Float4Vector) root.getVector(COLUMN);
@@ -602,7 +602,7 @@ public class ParquetColumnReaderTests extends DataFusionBackedTestCase {
         Schema schema = new Schema(List.of(new Field(COLUMN, FieldType.notNullable(arrowType), null)));
         NativeParquetWriter writer = new NativeParquetWriter(file.toString());
         try (ArrowExport schemaExport = exportSchema(schema)) {
-            writer.initialize("test-index", schemaExport.getSchemaAddress(), ParquetSortConfig.empty(), 0L);
+            writer.initialize("test-index", schemaExport.getSchemaAddress(), ParquetSortConfig.empty(), 0L, false);
         }
         try (VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
             FieldVector vector = root.getVector(COLUMN);

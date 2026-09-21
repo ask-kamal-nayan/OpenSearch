@@ -313,6 +313,50 @@ public class NumberParquetFieldTests extends OpenSearchTestCase {
         return new ManagedVSR(id, schema, child);
     }
 
+    public void testLongFieldMultiValueSortAscending() {
+        LongParquetField field = new LongParquetField();
+        MappedFieldType ft = new NumberFieldMapper.NumberFieldType("val", NumberFieldMapper.NumberType.LONG);
+        ManagedVSR vsr = createListVSR("long-sort-test", field, "val");
+        // sortMultiValues=true reorders this document's values ascending before they hit the vector.
+        field.createField(ft, vsr, List.of(7L, 2L, 5L), true);
+        vsr.setRowCount(1);
+        assertEquals(List.of(2L, 5L, 7L), ((ListVector) vsr.getVector("val")).getObject(0));
+        cleanupVSR(vsr);
+    }
+
+    public void testLongFieldMultiValueSortIsSignedNotUnsigned() {
+        // Negative longs (high bit set) must sort BELOW positives — the raw signed-long order the
+        // reader uses (KIND_LONG), not unsigned magnitude. -1L as unsigned would be the largest.
+        LongParquetField field = new LongParquetField();
+        MappedFieldType ft = new NumberFieldMapper.NumberFieldType("val", NumberFieldMapper.NumberType.LONG);
+        ManagedVSR vsr = createListVSR("long-signed-sort-test", field, "val");
+        field.createField(ft, vsr, List.of(1L, -1L, 0L), true);
+        vsr.setRowCount(1);
+        assertEquals(List.of(-1L, 0L, 1L), ((ListVector) vsr.getVector("val")).getObject(0));
+        cleanupVSR(vsr);
+    }
+
+    public void testDoubleFieldMultiValueSortAscending() {
+        DoubleParquetField field = new DoubleParquetField();
+        MappedFieldType ft = new NumberFieldMapper.NumberFieldType("val", NumberFieldMapper.NumberType.DOUBLE);
+        ManagedVSR vsr = createListVSR("double-sort-test", field, "val");
+        field.createField(ft, vsr, List.of(2.5, -1.5, 0.25), true);
+        vsr.setRowCount(1);
+        assertEquals(List.of(-1.5, 0.25, 2.5), ((ListVector) vsr.getVector("val")).getObject(0));
+        cleanupVSR(vsr);
+    }
+
+    public void testLongFieldMultiValueUnsortedWhenDisabled() {
+        // With the sort off (the default createField path), values keep document order.
+        LongParquetField field = new LongParquetField();
+        MappedFieldType ft = new NumberFieldMapper.NumberFieldType("val", NumberFieldMapper.NumberType.LONG);
+        ManagedVSR vsr = createListVSR("long-nosort-test", field, "val");
+        field.createField(ft, vsr, List.of(7L, 2L, 5L), false);
+        vsr.setRowCount(1);
+        assertEquals(List.of(7L, 2L, 5L), ((ListVector) vsr.getVector("val")).getObject(0));
+        cleanupVSR(vsr);
+    }
+
     private void cleanupVSR(ManagedVSR vsr) {
         vsr.moveToFrozen();
         vsr.close();

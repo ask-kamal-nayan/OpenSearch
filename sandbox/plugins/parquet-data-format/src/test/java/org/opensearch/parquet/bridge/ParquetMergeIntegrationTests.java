@@ -242,7 +242,7 @@ public class ParquetMergeIntegrationTests extends OpenSearchTestCase {
 
         try (ArrowExport schemaExport = exportSchema()) {
             NativeParquetWriter writer = new NativeParquetWriter(filePath);
-            writer.initialize(INDEX_NAME, schemaExport.getSchemaAddress(), sortConfig, 0L);
+            writer.initialize(INDEX_NAME, schemaExport.getSchemaAddress(), sortConfig, 0L, false);
 
             try (ArrowExport dataExport = exportData(timestamps, messages)) {
                 writer.write(dataExport.getArrayAddress(), dataExport.getSchemaAddress());

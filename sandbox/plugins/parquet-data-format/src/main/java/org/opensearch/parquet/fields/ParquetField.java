@@ -34,6 +34,9 @@ import org.opensearch.parquet.vsr.ManagedVSR;
 
 import java.net.InetAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Set;
 
@@ -164,11 +167,25 @@ public abstract class ParquetField {
      * @param parseValue the parsed value to write
      */
     public final void createField(MappedFieldType fieldType, ManagedVSR managedVSR, Object parseValue) {
+        createField(fieldType, managedVSR, parseValue, false);
+    }
+
+    /**
+     * Creates and processes a field entry, optionally sorting a multi-value list ascending on write.
+     * Throws if the vector is not present in the VSR.
+     *
+     * @param fieldType the mapped field type
+     * @param managedVSR the managed vector schema root
+     * @param parseValue the parsed value to write
+     * @param sortMultiValues when true and the target is a list column, order this document's values
+     *                        ascending before writing (see {@link #writeList})
+     */
+    public final void createField(MappedFieldType fieldType, ManagedVSR managedVSR, Object parseValue, boolean sortMultiValues) {
         assert fieldType != null : "MappedFieldType cannot be null";
         assert managedVSR != null : "ManagedVSR cannot be null";
         FieldVector vector = managedVSR.getVector(fieldType.name());
         if (vector instanceof ListVector listVector) {
-            writeList(fieldType, managedVSR, listVector, parseValue);
+            writeList(fieldType, managedVSR, listVector, parseValue, sortMultiValues);
             return;
         }
         addToGroup(fieldType, managedVSR, parseValue);
@@ -180,14 +197,28 @@ public abstract class ParquetField {
      * A null {@code parseValue} is written as a null list, which is how an absent field is
      * represented. An empty list is written as a zero-length, non-null list, preserving the
      * distinction between {@code "tags": []} and no {@code tags} at all.
+     * <p>
+     * When {@code sortValues} is true the document's values are ordered ascending before they are
+     * written, so the multi-valued doc-values reader can skip its own sort (gated by the
+     * {@code opensearch.values_sorted} footer marker). The ordering mirrors the read side:
+     * signed-long order for integral and unsigned-long values, numeric order for floating-point
+     * values, and UTF-8 byte order for keywords. Null elements are ordered last; the reader drops
+     * per-value nulls, so their position is immaterial.
      */
-    private void writeList(MappedFieldType fieldType, ManagedVSR managedVSR, ListVector listVector, Object parseValue) {
+    private void writeList(MappedFieldType fieldType, ManagedVSR managedVSR, ListVector listVector, Object parseValue, boolean sortValues) {
         int row = managedVSR.getRowCount();
         if (parseValue == null) {
             listVector.setNull(row);
             return;
         }
         List<?> values = parseValue instanceof List<?> list ? list : List.of(parseValue);
+        if (sortValues && values.size() > 1) {
+            // Copy before sorting: the source list may be immutable or shared, and only this row's
+            // ordering should change. See LIST_VALUE_ASCENDING for why the order matches the reader.
+            List<Object> ordered = new ArrayList<>(values);
+            ordered.sort(LIST_VALUE_ASCENDING);
+            values = ordered;
+        }
         int start = listVector.startNewValue(row);
         FieldVector dataVector = listVector.getDataVector();
         for (int i = 0; i < values.size(); i++) {
@@ -200,6 +231,35 @@ public abstract class ParquetField {
         }
         listVector.endValue(row, values.size());
     }
+
+    /**
+     * Orders one document's parsed list values ascending to match the read-side doc-values order,
+     * so a marker-trusting reader observes the same order it would have produced itself:
+     * <ul>
+     *   <li>integral and unsigned-long values by signed {@code long} order — the raw doc-values long
+     *       the reader sorts (unsigned longs are stored and compared by their raw two's-complement
+     *       bits, not by magnitude);</li>
+     *   <li>floating-point values by numeric order, which matches the reader's order-preserving
+     *       sortable-bits encoding;</li>
+     *   <li>keyword and other values by UTF-8 (unsigned byte) order.</li>
+     * </ul>
+     * Nulls are ordered last.
+     */
+    private static final Comparator<Object> LIST_VALUE_ASCENDING = Comparator.nullsLast((a, b) -> {
+        if (a instanceof Number na && b instanceof Number nb) {
+            if (a instanceof Double || a instanceof Float || b instanceof Double || b instanceof Float) {
+                return Double.compare(na.doubleValue(), nb.doubleValue());
+            }
+            return Long.compare(na.longValue(), nb.longValue());
+        }
+        if (a instanceof Boolean ba && b instanceof Boolean bb) {
+            return Boolean.compare(ba, bb);
+        }
+        return Arrays.compareUnsigned(
+            a.toString().getBytes(StandardCharsets.UTF_8),
+            b.toString().getBytes(StandardCharsets.UTF_8)
+        );
+    });
 
     /**
      * Returns the set of capabilities supported by this field type.

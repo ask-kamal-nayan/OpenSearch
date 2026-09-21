@@ -236,7 +236,7 @@ public class ParquetListSortModeIntegrationTests extends OpenSearchTestCase {
         String file = path.toString();
         try (ArrowExport schemaExport = exportSchema()) {
             NativeParquetWriter writer = new NativeParquetWriter(file);
-            writer.initialize(INDEX_NAME, schemaExport.getSchemaAddress(), sortConfig, 0L);
+            writer.initialize(INDEX_NAME, schemaExport.getSchemaAddress(), sortConfig, 0L, false);
             try (ArrowExport data = exportData(ids, tags)) {
                 writer.write(data.getArrayAddress(), data.getSchemaAddress());
             }

@@ -638,6 +638,17 @@ public class VSRManagerTests extends ParquetBaseTests {
         assertEquals(new ArrowType.Int(32, true), field.getChildren().getFirst().getType());
     }
 
+    public void testMultiValueNumericFieldIsSupported() {
+        // C3 enables numeric multi-value ingest: the field now produces a LIST<element> column
+        // instead of rejecting the request.
+        assertTrue(new IntegerParquetField().supportsMultiValue());
+        Field listField = new IntegerParquetField().toArrowField("numbers", true);
+        assertEquals("numbers", listField.getName());
+        assertTrue(listField.getType() instanceof ArrowType.List);
+        assertEquals(1, listField.getChildren().size());
+        assertEquals(ParquetField.LIST_ELEMENT_NAME, listField.getChildren().getFirst().getName());
+    }
+
     public void testMultiValueFieldWritesEmptyListDistinctFromAbsent() throws Exception {
         String filePath = createTempDir().resolve("multi-value-empty.parquet").toString();
         VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 100, threadPool, 0L);

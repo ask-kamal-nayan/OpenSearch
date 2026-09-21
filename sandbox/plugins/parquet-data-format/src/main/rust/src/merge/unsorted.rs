@@ -73,6 +73,7 @@ pub fn merge_unsorted_with_pool(
     let mut readers: Vec<ParquetRecordBatchReader> = Vec::with_capacity(input_files.len());
     let mut file_row_counts: Vec<usize> = Vec::with_capacity(input_files.len());
     let mut file_generations: Vec<i64> = Vec::with_capacity(input_files.len());
+    let mut file_values_sorted: Vec<bool> = Vec::with_capacity(input_files.len());
 
     for (file_idx, path) in input_files.iter().enumerate() {
         let file = File::open(path)?;
@@ -82,6 +83,10 @@ pub fn merge_unsorted_with_pool(
         let generation = crate::writer_properties_builder::read_writer_generation(
             builder.metadata().file_metadata(),
             file_idx,
+        );
+        // Read the values_sorted marker from the SAME footer loaded above (no second open).
+        let values_sorted = crate::writer_properties_builder::read_values_sorted(
+            builder.metadata().file_metadata(),
         );
 
         let projection_indices = projection_indices_excluding_row_id(&schema);
@@ -96,7 +101,15 @@ pub fn merge_unsorted_with_pool(
         readers.push(reader);
         file_row_counts.push(num_rows);
         file_generations.push(generation);
+        file_values_sorted.push(values_sorted);
     }
+
+    // Fold the values_sorted marker as a logical AND over ALL inputs: the merged output can only
+    // claim sorted values if every input was itself sorted. Seed with `false` when there are no
+    // inputs — a vacuous AND over zero inputs is `true`, which would dishonestly stamp
+    // values_sorted on an output derived from nothing.
+    let output_values_sorted =
+        !file_values_sorted.is_empty() && file_values_sorted.iter().all(|&v| v);
 
     let ctx_reservation = reservation.child("merge:flush");
     let mut ctx = MergeContext::new(
@@ -107,6 +120,7 @@ pub fn merge_unsorted_with_pool(
         rayon_threads,
         io_threads,
         output_writer_generation,
+        output_values_sorted,
         ctx_reservation,
     )?;
 

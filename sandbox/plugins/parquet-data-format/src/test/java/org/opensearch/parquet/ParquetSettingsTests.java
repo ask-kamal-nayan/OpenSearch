@@ -382,4 +382,26 @@ public class ParquetSettingsTests extends OpenSearchTestCase {
             )
         );
     }
+
+    // --- MULTI_VALUE_SORT_ENABLED (ingest multi-value sort) ---
+
+    public void testMultiValueSortEnabledDefaultsFalse() {
+        assertFalse(ParquetSettings.MULTI_VALUE_SORT_ENABLED.get(Settings.EMPTY));
+    }
+
+    public void testMultiValueSortEnabledIsRegisteredAndIndexScoped() {
+        assertTrue(
+            "MULTI_VALUE_SORT_ENABLED must be registered via ParquetSettings.getSettings()",
+            ParquetSettings.getSettings().contains(ParquetSettings.MULTI_VALUE_SORT_ENABLED)
+        );
+        assertTrue("setting must be index-scoped", ParquetSettings.MULTI_VALUE_SORT_ENABLED.hasIndexScope());
+        assertEquals("index.parquet.multi_value_sort_enabled", ParquetSettings.MULTI_VALUE_SORT_ENABLED.getKey());
+    }
+
+    public void testMultiValueSortEnabledRoundTrips() {
+        Settings on = Settings.builder().put("index.parquet.multi_value_sort_enabled", true).build();
+        assertTrue(ParquetSettings.MULTI_VALUE_SORT_ENABLED.get(on));
+        Settings off = Settings.builder().put("index.parquet.multi_value_sort_enabled", false).build();
+        assertFalse(ParquetSettings.MULTI_VALUE_SORT_ENABLED.get(off));
+    }
 }

@@ -167,6 +167,14 @@ pub fn merge_sorted_with_pool(
 
     let num_cursors = cursors.len();
 
+    // Fold the values_sorted marker as a logical AND over ALL inputs: the merged output can only
+    // claim sorted values if every input was itself sorted (the merge preserves within-row element
+    // order, so a single unsorted input taints the output). Seed with `false` when there are no
+    // inputs — a vacuous AND over zero inputs is `true`, which would dishonestly stamp
+    // values_sorted on an output derived from nothing.
+    let output_values_sorted =
+        !cursors.is_empty() && cursors.iter().all(|c| c.values_sorted());
+
     // ── Phase 2: Create MergeContext (union schemas, writer, IO task) ───
     let ctx_reservation = reservation.child("merge:flush");
     let mut ctx = MergeContext::new(
@@ -177,6 +185,7 @@ pub fn merge_sorted_with_pool(
         rayon_threads,
         io_threads,
         output_writer_generation,
+        output_values_sorted,
         ctx_reservation,
     )?;
 

@@ -80,7 +80,8 @@ public class RustBridge {
                 ValueLayout.JAVA_LONG,   // nulls_first (vals, count)
                 ValueLayout.ADDRESS,
                 ValueLayout.JAVA_LONG,   // max_sort_modes (vals, count)
-                ValueLayout.JAVA_LONG    // writer_generation
+                ValueLayout.JAVA_LONG,   // writer_generation
+                ValueLayout.JAVA_LONG    // multi_value_sort_enabled (0/1)
             )
         );
         WRITE = linker.downcallHandle(
@@ -304,8 +305,14 @@ public class RustBridge {
 
     public static void initLogger() {}
 
-    static void createWriter(String file, String indexName, long schemaAddress, ParquetSortConfig sortConfig, long writerGeneration)
-        throws IOException {
+    static void createWriter(
+        String file,
+        String indexName,
+        long schemaAddress,
+        ParquetSortConfig sortConfig,
+        long writerGeneration,
+        boolean multiValueSortEnabled
+    ) throws IOException {
         try (var call = new NativeCall()) {
             var f = call.str(file);
             var idx = call.str(indexName);
@@ -329,7 +336,8 @@ public class RustBridge {
                 (long) sortConfig.nullsFirst().size(),
                 maxSortModesArray,
                 (long) sortConfig.maxSortModes().size(),
-                writerGeneration
+                writerGeneration,
+                multiValueSortEnabled ? 1L : 0L
             );
         }
     }
