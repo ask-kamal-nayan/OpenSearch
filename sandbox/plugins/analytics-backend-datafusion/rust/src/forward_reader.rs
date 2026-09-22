@@ -874,4 +874,84 @@ mod tests {
             "{error}"
         );
     }
+
+    /// A single-level `list<int32>` page whose null LEAF-slot count equals its ROW count must still
+    /// be decoded, not shortcut as all-null. The fixture shape is the whole point: rows
+    /// `[null], [null, null], [10]` are 3 rows but 4 leaf slots, 3 of them null - so arrow-rs sets
+    /// `is_null_page`/`null_count == 3`, which equals the 3-row count and would fire the all-null
+    /// skip on a scalar column. `read_batch_at` skips an all-null page and fabricates nulls WITHOUT
+    /// decoding, so if the `max_rep_level == 0` gate is dropped the real value 10 is silently lost.
+    /// Do NOT "simplify" this fixture to equal-length or scalar rows: that collapses the
+    /// slot-vs-row divergence and the test stops guarding the silent data-loss path. Falsifiable:
+    /// deleting `max_rep_level == 0 &&` from the `all_null` expression makes this fail.
+    #[test]
+    fn a_list_page_with_null_slots_matching_the_row_count_is_still_decoded() {
+        let list = ListArray::from_iter_primitive::<Int32Type, _, _>(vec![
+            Some(vec![None]),
+            Some(vec![None, None]),
+            Some(vec![Some(10)]),
+        ]);
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            list.data_type().clone(),
+            true,
+        )]));
+        let column: ArrayRef = Arc::new(list);
+        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![column]).unwrap();
+        let file = tempfile::tempfile().unwrap();
+        let properties = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(8))
+            .set_data_page_row_count_limit(3)
+            .set_write_batch_size(3)
+            .set_offset_index_disabled(false)
+            .build();
+        let mut writer =
+            ArrowWriter::try_new(file.try_clone().unwrap(), schema, Some(properties)).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let metadata = ParquetMetaDataReader::new()
+            .with_page_index_policy(PageIndexPolicy::Required)
+            .parse_and_finish(&file)
+            .map(Arc::new)
+            .unwrap();
+        // Guard against the writer splitting the rows across pages, which would defeat the probe:
+        // all three rows must sit in one page for the page-level null signal to cover the value 10.
+        let schema_descr = metadata.file_metadata().schema_descr();
+        assert_eq!(
+            schema_descr.column(0).max_rep_level(),
+            1,
+            "fixture must be single-level repeated for this test to prove anything"
+        );
+        let projection = ProjectionMask::leaves(schema_descr, [0]);
+        let mut reader = ParquetForwardBatchReader::try_new_with_chunk_reader(
+            File::from(file),
+            metadata,
+            projection,
+            4096,
+        )
+        .unwrap();
+
+        // Read all three rows of the single list page. If the all-null shortcut fired, row 2 would
+        // come back as a fabricated null instead of the real `[10]`.
+        let batch = reader.read_batch_at(0, 3).unwrap().unwrap();
+        assert_eq!(batch.num_rows(), 3);
+        let lists = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .expect("the list page must decode to a ListArray, not a fabricated null batch");
+        assert!(lists.is_valid(2), "row 2's list must be present, not null");
+        let last = lists.value(2);
+        let last = last
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .expect("the list's leaf values are int32");
+        assert_eq!(
+            (0..last.len())
+                .map(|i| last.is_valid(i).then(|| last.value(i)))
+                .collect::<Vec<_>>(),
+            vec![Some(10)],
+            "the real value 10 must survive - an all-null skip would have dropped it"
+        );
+    }
 }
