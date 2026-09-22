@@ -9,6 +9,7 @@
 package org.opensearch.be.datafusion.docvalues;
 
 import org.opensearch.be.datafusion.docvalues.bridge.ParquetColumnReader;
+import org.opensearch.be.datafusion.docvalues.bridge.ParquetListColumnReader;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -28,9 +29,15 @@ import java.util.List;
 final class CursorRegistry implements Closeable {
 
     private final List<ParquetColumnReader> cursors = Collections.synchronizedList(new ArrayList<>());
+    // Multi-valued list cursors registered on the same request lifecycle. Kept in a list separate
+    // from the scalar cursors so opened() still exposes only the scalar view callers/tests expect,
+    // while close() releases both. The scalar `cursors` list is the single monitor guarding `closed`
+    // for both registration paths, so a list-cursor open racing a concurrent close is handled exactly
+    // like a scalar one and never leaks a native handle.
+    private final List<ParquetListColumnReader> listCursors = Collections.synchronizedList(new ArrayList<>());
     private boolean closed;
 
-    /** Records a cursor this request opened; it is closed by {@link #close()} at request end. */
+    /** Records a scalar cursor this request opened; it is closed by {@link #close()} at request end. */
     void register(ParquetColumnReader cursor) {
         synchronized (cursors) {
             if (closed) {
@@ -39,6 +46,21 @@ final class CursorRegistry implements Closeable {
                 throw new IllegalStateException("cursor registry is closed");
             }
             cursors.add(cursor);
+        }
+    }
+
+    /**
+     * Records a multi-valued list cursor this request opened, released by {@link #close()} on the same
+     * lifecycle as scalar cursors so a request's list cursors never outlive it.
+     */
+    void register(ParquetListColumnReader cursor) {
+        synchronized (cursors) {
+            if (closed) {
+                // The request already ended; close immediately rather than record on a drained list.
+                cursor.close();
+                throw new IllegalStateException("cursor registry is closed");
+            }
+            listCursors.add(cursor);
         }
     }
 
@@ -53,11 +75,16 @@ final class CursorRegistry implements Closeable {
                 // Idempotent through NativeHandle; close never throws checked exceptions.
                 cursor.close();
             }
+            for (ParquetListColumnReader cursor : listCursors) {
+                // Same idempotent NativeHandle teardown as scalar cursors, on the same request lifecycle.
+                cursor.close();
+            }
             cursors.clear();
+            listCursors.clear();
         }
     }
 
-    /** Cursors opened on this request (tests). */
+    /** Scalar cursors opened on this request (tests). */
     List<ParquetColumnReader> opened() {
         synchronized (cursors) {
             return List.copyOf(cursors);

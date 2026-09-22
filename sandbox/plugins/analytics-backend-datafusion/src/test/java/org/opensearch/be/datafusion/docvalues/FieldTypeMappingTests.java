@@ -74,6 +74,36 @@ public class FieldTypeMappingTests extends OpenSearchTestCase {
     }
 
     /**
+     * Replaces the retired {@code testMultiValuedSelectionResolvesToSortedNumericDistinctFromSingleValued},
+     * which asserted a NUMERIC-vs-SORTED_NUMERIC distinction against the deleted {@code Mapping} record.
+     * Under base #23055 every supported type resolves uniformly to SORTED_NUMERIC, so this pins that
+     * uniform mapping across the full supported set and confirms the requested-type guard rejects any DV
+     * type that is not SORTED_NUMERIC - the same invariant the old test protected, on the new API.
+     */
+    public void testEverySupportedTypeResolvesToSortedNumericAndRejectsOtherRequestedDvTypes() {
+        for (String type : new String[] {
+            "byte",
+            "short",
+            "integer",
+            "long",
+            "float",
+            "double",
+            "date",
+            "date_nanos",
+            "boolean",
+            "unsigned_long",
+            "scaled_float",
+            "half_float" }) {
+            assertEquals(type + " must resolve to SORTED_NUMERIC", DocValuesType.SORTED_NUMERIC, FieldTypeMapping.forType(type));
+            // The requested-type guard admits only SORTED_NUMERIC; NUMERIC (the retired single-valued
+            // arm) and every other DV type must be rejected for an otherwise-supported mapping type.
+            FieldTypeMapping.validate(type + "_field", type, DocValuesType.SORTED_NUMERIC);
+            expectThrows(IllegalArgumentException.class, () -> FieldTypeMapping.validate(type + "_field", type, DocValuesType.NUMERIC));
+            expectThrows(IllegalArgumentException.class, () -> FieldTypeMapping.validate(type + "_field", type, DocValuesType.SORTED_SET));
+        }
+    }
+
+    /**
      * {@code validate} is the gate {@code ParquetDocValuesProducer.getSortedNumeric}
      * actually calls, once the field's {@code MappedFieldType} is known, so it is what keeps an
      * unsupported type from ever reaching the native cursor.

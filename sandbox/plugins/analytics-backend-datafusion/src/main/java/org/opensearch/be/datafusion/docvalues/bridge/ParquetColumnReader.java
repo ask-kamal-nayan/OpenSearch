@@ -142,6 +142,20 @@ public final class ParquetColumnReader extends NativeHandle implements NumericVa
     }
 
     /**
+     * Whether this column is physically repeated (a Parquet LIST) in the file, read from the file's
+     * own schema through the native cursor. Never advances the cursor, so it is safe to probe before
+     * or without reading any value. The read path routes a field to the multi-valued list reader
+     * only when its mapping declares it multi-valued AND this returns {@code true}: the declaration
+     * can legitimately be wider than the file after a scalar-to-LIST promotion, so an older,
+     * physically scalar segment must fall through to the scalar path rather than be handed to the
+     * list reader.
+     */
+    public boolean isPhysicallyRepeated() throws IOException {
+        ensureOpen();
+        return ParquetCodecBridge.isRepeated(ptr);
+    }
+
+    /**
      * Ensures the resident batch contains {@code row}. A row already resident is served without
      * touching the cursor, a row ahead of it advances the cursor, and a row behind it reopens the
      * cursor first.
