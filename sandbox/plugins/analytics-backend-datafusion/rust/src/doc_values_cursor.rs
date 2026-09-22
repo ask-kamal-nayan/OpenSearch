@@ -365,6 +365,43 @@ fn at_eof(
     Ok(false)
 }
 
+/// Shared prologue for the two doc-values batch entry points: locks the cursor, releases any prior
+/// borrow, advances to `target_row`, and validates the decoded row count. Returns `None` at
+/// end-of-column so each caller keeps its own `Ok(RC_EOF)` early return; on success it hands back
+/// the still-held lock guard, the decoded batch, and its row count for the caller's own export tail.
+///
+/// Takes the `&Arc<Mutex<..>>` the caller resolved through `cursor_for` rather than resolving the
+/// handle itself: the returned guard borrows from that `Arc`, so the `Arc` must be owned by the
+/// caller and outlive the guard. Deliberately a plain private fn - not `extern "C"`, `#[no_mangle]`
+/// or `#[ffm_safe]` - because it is called from inside the two `#[ffm_safe]` closures, and it
+/// returns `Result<_, String>` so each caller's `?` keeps working.
+fn prepare_batch<'a>(
+    cursor: &'a Arc<Mutex<DocValuesCursor>>,
+    target_row: i64,
+    fn_name: &str,
+) -> Result<Option<(parking_lot::MutexGuard<'a, DocValuesCursor>, RecordBatch, usize)>, String> {
+    let mut cursor = cursor.lock();
+
+    // Released here rather than on success, so no early return below leaves buffers held. Java
+    // clears its resident batch before calling. The reservation follows the batch.
+    cursor.borrowed_batch = None;
+    cursor.reservation.resize(0);
+
+    if at_eof(&cursor, target_row, fn_name).map_err(|e| e.to_string())? {
+        return Ok(None); // target is past the last row (e.g. a scan running off the end)
+    }
+
+    let batch = cursor.next_batch(target_row).map_err(|e| e.to_string())?;
+    let rows = batch.num_rows();
+    if rows == 0 || rows > cursor.max_batch_size {
+        return Err(format!(
+            "{fn_name}: Arrow returned {rows} rows, expected 1..={}",
+            cursor.max_batch_size
+        ));
+    }
+    Ok(Some((cursor, batch, rows)))
+}
+
 /// Writes `value` through a nullable out-parameter.
 unsafe fn write_out(ptr: *mut i64, value: i64) {
     if !ptr.is_null() {
@@ -761,25 +798,10 @@ pub unsafe extern "C" fn parquet_df_next_batch(
 ) -> i64 {
     static FN: &str = "parquet_df_next_batch";
     let cursor = cursor_for(handle, FN).map_err(|e| e.to_string())?;
-    let mut cursor = cursor.lock();
-
-    // Released here rather than on success, so no early return below leaves buffers held. Java
-    // clears its resident batch before calling. The reservation follows the batch.
-    cursor.borrowed_batch = None;
-    cursor.reservation.resize(0);
-
-    if at_eof(&cursor, target_row, FN).map_err(|e| e.to_string())? {
-        return Ok(RC_EOF); // target is past the last row (e.g. a scan running off the end)
-    }
-
-    let batch = cursor.next_batch(target_row).map_err(|e| e.to_string())?;
-    let rows = batch.num_rows();
-    if rows == 0 || rows > cursor.max_batch_size {
-        return Err(format!(
-            "{FN}: Arrow returned {rows} rows, expected 1..={}",
-            cursor.max_batch_size
-        ));
-    }
+    let (mut cursor, batch, rows) = match prepare_batch(&cursor, target_row, FN)? {
+        Some(prepared) => prepared,
+        None => return Ok(RC_EOF), // target is past the last row (e.g. a scan running off the end)
+    };
 
     // Scoped so the borrow ends before `batch` moves onto the cursor; `BorrowedBuffers` holds
     // plain addresses.
@@ -833,25 +855,10 @@ pub unsafe extern "C" fn parquet_df_next_list_batch(
 ) -> i64 {
     static FN: &str = "parquet_df_next_list_batch";
     let cursor = cursor_for(handle, FN).map_err(|e| e.to_string())?;
-    let mut cursor = cursor.lock();
-
-    // Released here rather than on success, so no early return below leaves buffers held. Java
-    // clears its resident batch before calling. The reservation follows the batch.
-    cursor.borrowed_batch = None;
-    cursor.reservation.resize(0);
-
-    if at_eof(&cursor, target_row, FN).map_err(|e| e.to_string())? {
-        return Ok(RC_EOF); // target is past the last row (e.g. a scan running off the end)
-    }
-
-    let batch = cursor.next_batch(target_row).map_err(|e| e.to_string())?;
-    let rows = batch.num_rows();
-    if rows == 0 || rows > cursor.max_batch_size {
-        return Err(format!(
-            "{FN}: Arrow returned {rows} rows, expected 1..={}",
-            cursor.max_batch_size
-        ));
-    }
+    let (mut cursor, batch, rows) = match prepare_batch(&cursor, target_row, FN)? {
+        Some(prepared) => prepared,
+        None => return Ok(RC_EOF), // target is past the last row (e.g. a scan running off the end)
+    };
 
     // Scoped so the borrow ends before `batch` moves onto the cursor; `BorrowedListBuffers` holds
     // plain addresses.
