@@ -296,6 +296,54 @@ public class MaxAggregatorTests extends AggregatorTestCase {
         }, fieldType);
     }
 
+    public void testSingleValueInMultiValuedUnsignedLongField() throws IOException {
+        // Suggestion item: explicit single-value case on a multi-valued unsigned_long field, which
+        // exercises the count == 1 path of MultiValueMode's unsigned MAX pick.
+        MappedFieldType fieldType = new NumberFieldMapper.NumberFieldType("value", NumberFieldMapper.NumberType.UNSIGNED_LONG);
+        MaxAggregationBuilder aggregationBuilder = new MaxAggregationBuilder("_name").field("value");
+
+        testAggregation(aggregationBuilder, new FieldExistsQuery("value"), iw -> {
+            iw.addDocument(singleton(new SortedNumericDocValuesField("value", 42L)));
+            iw.addDocument(singleton(new SortedNumericDocValuesField("value", 99L)));
+        }, max -> {
+            assertEquals(99.0, max.getValue(), 0);
+            assertTrue(AggregationInspectionHelper.hasValue(max));
+        }, fieldType);
+    }
+
+    public void testUnsignedLongAbsentField() throws IOException {
+        // Suggestion item: absent-field case on an unsigned_long aggregation yields no value.
+        MappedFieldType fieldType = new NumberFieldMapper.NumberFieldType("value", NumberFieldMapper.NumberType.UNSIGNED_LONG);
+        MaxAggregationBuilder aggregationBuilder = new MaxAggregationBuilder("_name").field("value");
+
+        testAggregation(aggregationBuilder, new MatchAllDocsQuery(), iw -> {
+            iw.addDocument(singleton(new SortedNumericDocValuesField("absent_value", 7L)));
+            iw.addDocument(singleton(new SortedNumericDocValuesField("absent_value", 3L)));
+        }, max -> {
+            assertEquals(Double.NEGATIVE_INFINITY, max.getValue(), 0);
+            assertFalse(AggregationInspectionHelper.hasValue(max));
+        }, fieldType);
+    }
+
+    public void testMissingParamMultiValuedUnsignedLong() throws IOException {
+        // Suggestion item: missing: parameter on a multi-valued unsigned_long field. Doc A holds
+        // [7, 20] (unsigned max 20); a second doc lacks the field and takes the missing value 100,
+        // so the global maximum is 100.0.
+        MappedFieldType fieldType = new NumberFieldMapper.NumberFieldType("value", NumberFieldMapper.NumberType.UNSIGNED_LONG);
+        MaxAggregationBuilder aggregationBuilder = new MaxAggregationBuilder("_name").field("value").missing(100L);
+
+        testAggregation(aggregationBuilder, new MatchAllDocsQuery(), iw -> {
+            Document document = new Document();
+            document.add(new SortedNumericDocValuesField("value", 7L));
+            document.add(new SortedNumericDocValuesField("value", 20L));
+            iw.addDocument(document);
+            iw.addDocument(singleton(new SortedNumericDocValuesField("absent_value", 5L))); // takes missing -> 100
+        }, max -> {
+            assertEquals(100.0, max.getValue(), 0);
+            assertTrue(AggregationInspectionHelper.hasValue(max));
+        }, fieldType);
+    }
+
     private void testAggregation(Query query, CheckedConsumer<RandomIndexWriter, IOException> buildIndex, Consumer<InternalMax> verify)
         throws IOException {
         MappedFieldType fieldType = new NumberFieldMapper.NumberFieldType("number", NumberFieldMapper.NumberType.INTEGER);
@@ -574,6 +622,52 @@ public class MaxAggregatorTests extends AggregatorTestCase {
             assertEquals(12.0, max.getValue(), 0);
             assertTrue(AggregationInspectionHelper.hasValue(max));
         });
+    }
+
+    public void testMultiValuedUnsignedLongStraddling2Pow63() throws IOException {
+        // unsigned_long doc values are stored as RAW two's-complement bits, so Lucene's
+        // SortedNumericDocValues sorts each doc's values ascending as SIGNED longs.
+        // Doc A holds unsigned [100, 18446744073709551615]. As signed bits that is [100, -1],
+        // which signed-sorts to [-1, 100]. The true UNSIGNED maximum is 18446744073709551615
+        // (raw bits -1L, == 2^64 - 1, which as a double is 1.8446744073709552E19), but the
+        // positional-last element after signed sorting is 100. Other docs hold 5 and 200,
+        // so the buggy answer is max(100, 5, 200) = 200.0 while the correct answer is 2^64 - 1.
+        MappedFieldType fieldType = new NumberFieldMapper.NumberFieldType("value", NumberFieldMapper.NumberType.UNSIGNED_LONG);
+        MaxAggregationBuilder aggregationBuilder = new MaxAggregationBuilder("max").field("value");
+
+        // No point field is indexed, so the min/max BKD point-index fast path is not taken and
+        // the multi-value MultiValueMode.MAX.select path (the defect) is exercised.
+        testAggregation(aggregationBuilder, new FieldExistsQuery("value"), iw -> {
+            Document document = new Document();
+            document.add(new SortedNumericDocValuesField("value", 100L));
+            document.add(new SortedNumericDocValuesField("value", Long.parseUnsignedLong("18446744073709551615"))); // == -1L raw bits
+            iw.addDocument(document);
+            iw.addDocument(singleton(new SortedNumericDocValuesField("value", 5L)));
+            iw.addDocument(singleton(new SortedNumericDocValuesField("value", 200L)));
+        }, max -> {
+            assertEquals(1.8446744073709552E19, max.getValue(), 0); // unsigned max == 2^64 - 1
+            assertTrue(AggregationInspectionHelper.hasValue(max));
+        }, fieldType);
+    }
+
+    public void testMultiValuedUnsignedLongNoStraddle() throws IOException {
+        // Control case: all values are below 2^63, so signed order == unsigned order and the
+        // ordinary answer must remain correct (guards against a regression from the fix).
+        // Doc A holds [7, 20] (max 20), other docs hold 50 and 30, so the max is 50.0.
+        MappedFieldType fieldType = new NumberFieldMapper.NumberFieldType("value", NumberFieldMapper.NumberType.UNSIGNED_LONG);
+        MaxAggregationBuilder aggregationBuilder = new MaxAggregationBuilder("max").field("value");
+
+        testAggregation(aggregationBuilder, new FieldExistsQuery("value"), iw -> {
+            Document document = new Document();
+            document.add(new SortedNumericDocValuesField("value", 7L));
+            document.add(new SortedNumericDocValuesField("value", 20L));
+            iw.addDocument(document);
+            iw.addDocument(singleton(new SortedNumericDocValuesField("value", 50L)));
+            iw.addDocument(singleton(new SortedNumericDocValuesField("value", 30L)));
+        }, max -> {
+            assertEquals(50.0, max.getValue(), 0);
+            assertTrue(AggregationInspectionHelper.hasValue(max));
+        }, fieldType);
     }
 
     public void testMultiValuedFieldWithValueScript() throws IOException {

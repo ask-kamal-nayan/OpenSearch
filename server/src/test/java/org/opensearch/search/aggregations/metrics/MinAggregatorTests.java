@@ -553,6 +553,147 @@ public class MinAggregatorTests extends AggregatorTestCase {
         }, fieldType);
     }
 
+    public void testMultiValuedUnsignedLongStraddling2Pow63() throws IOException {
+        // unsigned_long doc values are stored as RAW two's-complement bits, so Lucene's
+        // SortedNumericDocValues sorts each doc's values ascending as SIGNED longs.
+        // Doc A holds unsigned [18446744073709551615, 3]. As signed bits that is [-1, 3],
+        // which signed-sorts to [-1, 3]. The true UNSIGNED minimum of that doc is 3, but the
+        // positional-first element after signed sorting is -1L (== 2^64 - 1 unsigned, a double
+        // of 1.8446744073709552E19). Other docs hold 10 and 100, so the correct global minimum
+        // is 3.0 (from doc A), while the buggy answer drops the 3 and returns min(10, 100) = 10.0.
+        MappedFieldType fieldType = new NumberFieldMapper.NumberFieldType("value", NumberFieldMapper.NumberType.UNSIGNED_LONG);
+        MinAggregationBuilder aggregationBuilder = new MinAggregationBuilder("min").field("value");
+
+        // No point field is indexed, so the min/max BKD point-index fast path is not taken and
+        // the multi-value MultiValueMode.MIN.select path (the defect) is exercised.
+        testCase(aggregationBuilder, new FieldExistsQuery("value"), iw -> {
+            Document document = new Document();
+            document.add(new SortedNumericDocValuesField("value", Long.parseUnsignedLong("18446744073709551615"))); // == -1L raw bits
+            document.add(new SortedNumericDocValuesField("value", 3L));
+            iw.addDocument(document);
+            iw.addDocument(singleton(new SortedNumericDocValuesField("value", 10L)));
+            iw.addDocument(singleton(new SortedNumericDocValuesField("value", 100L)));
+        }, (Consumer<InternalMin>) min -> {
+            assertEquals(3.0, min.getValue(), 0); // unsigned min comes from doc A's value 3
+            assertTrue(AggregationInspectionHelper.hasValue(min));
+        }, fieldType);
+    }
+
+    public void testMultiValuedUnsignedLongNoStraddle() throws IOException {
+        // Control case: all values are below 2^63, so signed order == unsigned order and the
+        // ordinary answer must remain correct (guards against a regression from the fix).
+        // Doc A holds [7, 20] (min 7), other docs hold 50 and 30, so the min is 7.0.
+        MappedFieldType fieldType = new NumberFieldMapper.NumberFieldType("value", NumberFieldMapper.NumberType.UNSIGNED_LONG);
+        MinAggregationBuilder aggregationBuilder = new MinAggregationBuilder("min").field("value");
+
+        testCase(aggregationBuilder, new FieldExistsQuery("value"), iw -> {
+            Document document = new Document();
+            document.add(new SortedNumericDocValuesField("value", 7L));
+            document.add(new SortedNumericDocValuesField("value", 20L));
+            iw.addDocument(document);
+            iw.addDocument(singleton(new SortedNumericDocValuesField("value", 50L)));
+            iw.addDocument(singleton(new SortedNumericDocValuesField("value", 30L)));
+        }, (Consumer<InternalMin>) min -> {
+            assertEquals(7.0, min.getValue(), 0);
+            assertTrue(AggregationInspectionHelper.hasValue(min));
+        }, fieldType);
+    }
+
+    public void testMultiValuedUnsignedLongZeroMinimum() throws IOException {
+        // Boundary case for MultiValueMode's unsigned MIN pick (MultiValueMode.java:507-519).
+        // Doc A holds unsigned [0, 5]. As signed bits that is [0, 5], which signed-sorts to [0, 5]
+        // (no negatives, so signed order == unsigned order). The true UNSIGNED minimum is 0.
+        // The pick's early-return guard `min > 0` is false for min == 0, so it drops into the scan
+        // loop which starts at the SECOND value and returns 5 instead of 0. Other docs hold 10 and
+        // 100, so the correct global minimum is 0.0 (from doc A) while the buggy answer is 5.0.
+        MappedFieldType fieldType = new NumberFieldMapper.NumberFieldType("value", NumberFieldMapper.NumberType.UNSIGNED_LONG);
+        MinAggregationBuilder aggregationBuilder = new MinAggregationBuilder("min").field("value");
+
+        // FieldExistsQuery (rather than a point query) forces the doc-values MultiValueMode path.
+        testCase(aggregationBuilder, new FieldExistsQuery("value"), iw -> {
+            Document document = new Document();
+            document.add(new SortedNumericDocValuesField("value", 0L));
+            document.add(new SortedNumericDocValuesField("value", 5L));
+            iw.addDocument(document);
+            iw.addDocument(singleton(new SortedNumericDocValuesField("value", 10L)));
+            iw.addDocument(singleton(new SortedNumericDocValuesField("value", 100L)));
+        }, (Consumer<InternalMin>) min -> {
+            assertEquals(0.0, min.getValue(), 0); // unsigned min is doc A's value 0
+            assertTrue(AggregationInspectionHelper.hasValue(min));
+        }, fieldType);
+    }
+
+    public void testMultiValuedUnsignedLongZeroWithStraddle() throws IOException {
+        // Doc A holds unsigned [18446744073709551615, 0, 5]. As signed bits that is [-1, 0, 5],
+        // which signed-sorts to [-1, 0, 5]. The true UNSIGNED minimum is 0. Here the leading -1
+        // makes the guard fall into the scan loop, which then finds the 0 at position 1, so this
+        // path is expected to be correct. Documents that the straddle case is distinct from the
+        // pure leading-zero defect in testMultiValuedUnsignedLongZeroMinimum.
+        MappedFieldType fieldType = new NumberFieldMapper.NumberFieldType("value", NumberFieldMapper.NumberType.UNSIGNED_LONG);
+        MinAggregationBuilder aggregationBuilder = new MinAggregationBuilder("min").field("value");
+
+        testCase(aggregationBuilder, new FieldExistsQuery("value"), iw -> {
+            Document document = new Document();
+            document.add(new SortedNumericDocValuesField("value", Long.parseUnsignedLong("18446744073709551615"))); // == -1L raw bits
+            document.add(new SortedNumericDocValuesField("value", 0L));
+            document.add(new SortedNumericDocValuesField("value", 5L));
+            iw.addDocument(document);
+            iw.addDocument(singleton(new SortedNumericDocValuesField("value", 10L)));
+            iw.addDocument(singleton(new SortedNumericDocValuesField("value", 100L)));
+        }, (Consumer<InternalMin>) min -> {
+            assertEquals(0.0, min.getValue(), 0); // unsigned min is doc A's value 0
+            assertTrue(AggregationInspectionHelper.hasValue(min));
+        }, fieldType);
+    }
+
+    public void testSingleValueInMultiValuedUnsignedLongField() throws IOException {
+        // Suggestion item: explicit single-value case on a multi-valued unsigned_long field, which
+        // exercises the count == 1 early-return branch of the pick.
+        MappedFieldType fieldType = new NumberFieldMapper.NumberFieldType("value", NumberFieldMapper.NumberType.UNSIGNED_LONG);
+        MinAggregationBuilder aggregationBuilder = new MinAggregationBuilder("min").field("value");
+
+        testCase(aggregationBuilder, new FieldExistsQuery("value"), iw -> {
+            iw.addDocument(singleton(new SortedNumericDocValuesField("value", 42L)));
+            iw.addDocument(singleton(new SortedNumericDocValuesField("value", 99L)));
+        }, (Consumer<InternalMin>) min -> {
+            assertEquals(42.0, min.getValue(), 0);
+            assertTrue(AggregationInspectionHelper.hasValue(min));
+        }, fieldType);
+    }
+
+    public void testUnsignedLongAbsentField() throws IOException {
+        // Suggestion item: absent-field case on an unsigned_long aggregation yields no value.
+        MappedFieldType fieldType = new NumberFieldMapper.NumberFieldType("value", NumberFieldMapper.NumberType.UNSIGNED_LONG);
+        MinAggregationBuilder aggregationBuilder = new MinAggregationBuilder("min").field("value");
+
+        testCase(aggregationBuilder, new MatchAllDocsQuery(), iw -> {
+            iw.addDocument(singleton(new SortedNumericDocValuesField("absent_value", 7L)));
+            iw.addDocument(singleton(new SortedNumericDocValuesField("absent_value", 3L)));
+        }, (Consumer<InternalMin>) min -> {
+            assertEquals(Double.POSITIVE_INFINITY, min.getValue(), 0);
+            assertFalse(AggregationInspectionHelper.hasValue(min));
+        }, fieldType);
+    }
+
+    public void testMissingParamMultiValuedUnsignedLong() throws IOException {
+        // Suggestion item: missing: parameter on a multi-valued unsigned_long field. Doc A holds
+        // [7, 20] (unsigned min 7); a second doc lacks the field and takes the missing value 100,
+        // so the global minimum is 7.0.
+        MappedFieldType fieldType = new NumberFieldMapper.NumberFieldType("value", NumberFieldMapper.NumberType.UNSIGNED_LONG);
+        MinAggregationBuilder aggregationBuilder = new MinAggregationBuilder("min").field("value").missing(100L);
+
+        testCase(aggregationBuilder, new MatchAllDocsQuery(), iw -> {
+            Document document = new Document();
+            document.add(new SortedNumericDocValuesField("value", 7L));
+            document.add(new SortedNumericDocValuesField("value", 20L));
+            iw.addDocument(document);
+            iw.addDocument(singleton(new SortedNumericDocValuesField("absent_value", 5L))); // takes missing -> 100
+        }, (Consumer<InternalMin>) min -> {
+            assertEquals(7.0, min.getValue(), 0);
+            assertTrue(AggregationInspectionHelper.hasValue(min));
+        }, fieldType);
+    }
+
     public void testMultiValuedFieldWithScript() throws IOException {
         MinAggregationBuilder aggregationBuilder = new MinAggregationBuilder("min").field("number")
             .script(new Script(ScriptType.INLINE, MockScriptEngine.NAME, INVERT_SCRIPT, Collections.emptyMap()));
